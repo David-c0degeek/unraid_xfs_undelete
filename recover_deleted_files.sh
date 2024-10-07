@@ -9,6 +9,19 @@ source config.sh
 # Source helper functions
 source lib/functions.sh
 
+# Handle password method
+if [ "$PASSWORD_METHOD" = "prompt" ]; then
+    # Prompt the user for the encryption passphrase
+    read -s -p "Enter encryption passphrase: " ENCRYPTION_PASSWORD
+    echo
+elif [ "$PASSWORD_METHOD" = "script" ]; then
+    # Password is already set in config.sh
+    echo "Using encryption password from config file."
+else
+    echo "Invalid PASSWORD_METHOD in config. Use 'prompt' or 'script'."
+    exit 1
+fi
+
 # Array to keep track of disk IDs
 DISK_IDS=()
 
