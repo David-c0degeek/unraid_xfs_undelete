@@ -10,10 +10,13 @@ After recovering deleted images, you may encounter files that are unusually larg
 2. Extra data beyond the actual image content might be included during recovery.
 3. This extraneous data inflates file sizes without adding value to the image.
 
-Post-processing addresses these issues by:
-- Extracting valid image data
-- Removing unnecessary appended data
-- Optimizing the image for storage efficiency
+## Solution Overview
+
+The post-processing addresses these issues by:
+
+1. Identifying the End of Valid Image Data: We detect where the actual image data ends using image file markers.
+2. Trimming the Files Accordingly: We truncate the files at the correct point to remove the extra data.
+3. Automating the Process: We use scripts to process all affected files efficiently.
 
 ## Features
 
@@ -22,6 +25,20 @@ Post-processing addresses these issues by:
 - Preserves metadata and directory structure
 - Handles multiple disk IDs
 - Significantly reduces file sizes without compromising image quality
+
+## Technical Process
+
+### JPEG Files
+- Structure: JPEG files have well-defined markers (Start of Image: FFD8, End of Image: FFD9)
+- Method: We use `jpegtran` to create a clean version of the file, stopping at the EOI marker
+
+### PNG Files
+- Structure: PNG files have a specific end marker (IEND chunk)
+- Method: We use `pngfix` to process and optimize the PNG files
+
+### GIF Files
+- Structure: GIF files end with a trailer byte (0x3B)
+- Method: We truncate the file at the trailer byte
 
 ## Prerequisites
 
@@ -52,3 +69,7 @@ Contributions to improve the image processing functionality are welcome. Please 
 ## Troubleshooting
 
 If you encounter any issues during post-processing, refer to the [Troubleshooting](../docs/troubleshooting.md) guide in the main documentation.
+
+## Important Note
+
+Always create a backup of your recovered files before running any post-processing scripts. This ensures you have a fallback in case of any unexpected issues.
