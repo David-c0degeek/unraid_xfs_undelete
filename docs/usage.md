@@ -15,19 +15,19 @@ Before running the script, you must configure it to match your specific Unraid s
    ```
 
    Customize the following variables:
-   - `DISKS`: Array of disks to process (update device paths and disk IDs)
+   - `DISKS`: Array of disks to process (update device paths, disk IDs, and encryption status)
    - `TIME_RANGE`: Time range for file recovery
    - `FILE_TYPES`: Types of files to recover
-   - `PASSWORD_METHOD`: Choose between "prompt" (more secure) or "script" (less secure)
+   - `PASSWORD_METHOD`: Choose between "prompt" (more secure) or "script" (less secure) for encrypted disks
    - `ENCRYPTION_PASSWORD`: Your disk encryption password (only if using PASSWORD_METHOD="script")
    - `OUTPUT_BASE_DIR`: Directory where recovered files will be stored
 
    Example of customizing the `DISKS` array:
    ```bash
    DISKS=(
-     "/dev/sda1 DISK1"
-     "/dev/sdb1 DISK2"
-     "/dev/sdc1 DISK3"
+     "/dev/sda1 DISK1 encrypted"
+     "/dev/sdb1 DISK2 unencrypted"
+     "/dev/sdc1 DISK3 encrypted"
    )
    ```
 
@@ -35,13 +35,9 @@ Before running the script, you must configure it to match your specific Unraid s
    ```bash
    OUTPUT_BASE_DIR="/mnt/disks/YOUR_OUTPUT_DISK/recovered_files"
    ```
-   Replace `YOUR_OUTPUT_DISK` with the actual disk or share where you want to store recovered files. 
-   For example, if you want to use a disk with ID "Data1", you might set it to:
-   ```bash
-   OUTPUT_BASE_DIR="/mnt/disks/Data1/recovered_files"
-   ```
+   Replace `YOUR_OUTPUT_DISK` with the actual disk or share where you want to store recovered files.
 
-3. Choose a password handling method:
+3. For encrypted disks, choose a password handling method:
    - For enhanced security, set `PASSWORD_METHOD="prompt"`. You'll be asked for the password when running the script.
    - If you prefer to store the password in the config file (less secure), set `PASSWORD_METHOD="script"` and provide the password in the `ENCRYPTION_PASSWORD` variable.
 
@@ -55,7 +51,7 @@ After customizing the configuration, execute the script with:
 ./recover_deleted_files.sh
 ```
 
-If you've set `PASSWORD_METHOD="prompt"`, you'll be asked to enter the encryption password when the script runs.
+If you've set `PASSWORD_METHOD="prompt"`, you'll be asked to enter the encryption password for encrypted disks when the script runs.
 
 ## Output
 

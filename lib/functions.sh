@@ -6,29 +6,36 @@
 process_disk() {
     local DEVICE=$1
     local DISK_ID=$2
+    local ENCRYPTION_STATUS=$3
 
-    echo "Processing $DEVICE ($DISK_ID)..."
+    echo "Processing $DEVICE ($DISK_ID) - $ENCRYPTION_STATUS"
 
-    # Clean up any previous mounts and mappings for this disk
+    # Clean up any previous mounts for this disk
     umount "/mnt/recovery_$DISK_ID" 2>/dev/null
-    cryptsetup luksClose "decrypted_$DISK_ID" 2>/dev/null
 
-    # Unlock the encrypted partition
-    if ! unlock_disk "$DEVICE" "$DISK_ID"; then
-        echo "Failed to unlock $DEVICE"
-        return 1
+    if [ "$ENCRYPTION_STATUS" = "encrypted" ]; then
+        # For encrypted disks
+        cryptsetup luksClose "decrypted_$DISK_ID" 2>/dev/null
+        if ! unlock_disk "$DEVICE" "$DISK_ID"; then
+            echo "Failed to unlock $DEVICE"
+            return 1
+        fi
+        FS_DEVICE="/dev/mapper/decrypted_$DISK_ID"
+    else
+        # For unencrypted disks
+        FS_DEVICE="$DEVICE"
     fi
 
-    # Mount the decrypted filesystem
-    if ! mount_filesystem "$DISK_ID"; then
+    # Mount the filesystem
+    if ! mount_filesystem "$DISK_ID" "$FS_DEVICE"; then
         return 1
     fi
 
     # Recover deleted files
-    recover_files "$DISK_ID"
+    recover_files "$DISK_ID" "$FS_DEVICE"
 
     # Clean up
-    cleanup_disk "$DISK_ID"
+    cleanup_disk "$DISK_ID" "$ENCRYPTION_STATUS"
 
     echo "Completed processing $DEVICE ($DISK_ID)."
 }
@@ -51,24 +58,15 @@ unlock_disk() {
     return 0
 }
 
-# Function to mount the decrypted filesystem
+# Function to mount the filesystem
 mount_filesystem() {
     local DISK_ID=$1
-    local FS_DEVICE="/dev/mapper/decrypted_$DISK_ID"
-
-    # Check if the decrypted device contains partitions
-    local PARTITIONS=$(lsblk -ln -o NAME "$FS_DEVICE" | grep -E "^├─|^└─")
-    if [ -n "$PARTITIONS" ]; then
-        # If partitions exist, use the first partition
-        local PART_NAME=$(lsblk -ln -o NAME "$FS_DEVICE" | grep -E "^├─|^└─" | head -n1 | awk '{print $1}')
-        FS_DEVICE="/dev/mapper/$PART_NAME"
-    fi
+    local FS_DEVICE=$2
 
     # Verify that the filesystem is XFS
     local FS_TYPE=$(blkid -o value -s TYPE "$FS_DEVICE")
     if [ "$FS_TYPE" != "xfs" ]; then
         echo "The filesystem on $FS_DEVICE is not XFS. Skipping."
-        cryptsetup luksClose "decrypted_$DISK_ID"
         return 1
     fi
 
@@ -76,11 +74,10 @@ mount_filesystem() {
     local MOUNT_POINT="/mnt/recovery_$DISK_ID"
     mkdir -p "$MOUNT_POINT"
 
-    # Mount the decrypted filesystem (read-only)
+    # Mount the filesystem (read-only)
     mount -o ro "$FS_DEVICE" "$MOUNT_POINT"
     if [ $? -ne 0 ]; then
         echo "Failed to mount $FS_DEVICE"
-        cryptsetup luksClose "decrypted_$DISK_ID"
         return 1
     fi
 
@@ -90,11 +87,12 @@ mount_filesystem() {
 # Function to recover files
 recover_files() {
     local DISK_ID=$1
+    local FS_DEVICE=$2
     local OUTPUT_DIR="$OUTPUT_BASE_DIR/$DISK_ID"
     mkdir -p "$OUTPUT_DIR"
 
     cd "$XFS_UNDELETE_PATH"
-    ./xfs_undelete -t "$TIME_RANGE" -r "$FILE_TYPES" -o "$OUTPUT_DIR" "/dev/mapper/decrypted_$DISK_ID"
+    ./xfs_undelete -t "$TIME_RANGE" -r "$FILE_TYPES" -o "$OUTPUT_DIR" "$FS_DEVICE"
 
     # Optional: Delete .matroska files if not needed
     if [ "$DELETE_MATROSKA" = true ]; then
@@ -105,8 +103,11 @@ recover_files() {
 # Function to clean up after processing a disk
 cleanup_disk() {
     local DISK_ID=$1
+    local ENCRYPTION_STATUS=$2
     umount "/mnt/recovery_$DISK_ID"
-    cryptsetup luksClose "decrypted_$DISK_ID"
+    if [ "$ENCRYPTION_STATUS" = "encrypted" ]; then
+        cryptsetup luksClose "decrypted_$DISK_ID"
+    fi
 }
 
 # Function to perform final cleanup

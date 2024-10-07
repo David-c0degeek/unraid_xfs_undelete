@@ -2,14 +2,14 @@
 
 # IMPORTANT: This is an example configuration. You MUST modify these values to match your specific setup.
 
-# Array of disks with device paths and disk IDs
-# Format: "/dev/sdX1 DISK_ID"
+# Array of disks with device paths, disk IDs, and encryption status
+# Format: "/dev/sdX1 DISK_ID encrypted|unencrypted"
 # CUSTOMIZE THESE VALUES for your specific disks:
 DISKS=(
-  "/dev/sdb1 DISK1"
-  "/dev/sdg1 DISK2"
-  "/dev/sdd1 DISK3"
-  "/dev/sdf1 DISK4"
+  "/dev/sdb1 DISK1 encrypted"
+  "/dev/sdg1 DISK2 encrypted"
+  "/dev/sdd1 DISK3 unencrypted"
+  "/dev/sdf1 DISK4 unencrypted"
 )
 
 # Time range for file recovery
@@ -20,7 +20,7 @@ TIME_RANGE="2023-01-01..now"
 # Use "*" for all files, or specify types like "image/*"
 FILE_TYPES="*"
 
-# Encryption password handling
+# Encryption password handling (for encrypted disks)
 # Set to "prompt" to be asked for the password at runtime (more secure)
 # Set to "script" to use the password defined below (less secure)
 PASSWORD_METHOD="prompt"
