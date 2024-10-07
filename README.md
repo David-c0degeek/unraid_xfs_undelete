@@ -8,6 +8,7 @@ This project provides a script and documentation for recovering deleted files fr
 2. Follow the installation instructions in `docs/installation.md`.
 3. Copy `examples/example_config.sh` to `config.sh` and customize it for your setup.
    - **Important:** Update disk identifiers and paths to match your system.
+   - **Crucial:** Set the `OUTPUT_BASE_DIR` to your desired recovery location.
    - Choose your preferred password handling method (prompt or script).
 4. Run the script:
    ```
@@ -19,12 +20,12 @@ This project provides a script and documentation for recovering deleted files fr
 The script uses a configuration file (`config.sh`) to set various parameters. You must customize this file to match your specific Unraid setup, including:
 
 - Disk identifiers and device paths
-- Output directory for recovered files
+- Output directory for recovered files (very important to set this correctly)
 - Time range for file recovery
 - File types to recover
 - Password handling method (prompt or script)
 
-See `examples/example_config.sh` for a template and `docs/usage.md` for detailed instructions.
+See `examples/example_config.sh` for a template and `docs/usage.md` for detailed instructions on how to customize each setting, especially the output directory.
 
 ## Documentation
 

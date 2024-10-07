@@ -6,10 +6,10 @@
 # Format: "/dev/sdX1 DISK_ID"
 # CUSTOMIZE THESE VALUES for your specific disks:
 DISKS=(
-  "/dev/sdb1 ZL2KG9X9"
-  "/dev/sdg1 ZL2KG6WF"
-  "/dev/sdd1 WL2068SD"
-  "/dev/sdf1 ZL2PFBXQ"
+  "/dev/sdb1 DISK1"
+  "/dev/sdg1 DISK2"
+  "/dev/sdd1 DISK3"
+  "/dev/sdf1 DISK4"
 )
 
 # Time range for file recovery
@@ -32,7 +32,8 @@ ENCRYPTION_PASSWORD="YourEncryptionPassword"
 
 # Output directory for recovered files
 # CUSTOMIZE THIS PATH to match your desired output location:
-OUTPUT_BASE_DIR="/mnt/disks/ZVTDW2MH/recovered_files"
+# Replace YOUR_OUTPUT_DISK with the actual disk or share where you want to store recovered files
+OUTPUT_BASE_DIR="/mnt/disks/YOUR_OUTPUT_DISK/recovered_files"
 
 # XFS Undelete tool path
 # Update this if you installed xfs_undelete in a different location:

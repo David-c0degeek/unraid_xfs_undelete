@@ -31,9 +31,14 @@ Before running the script, you must configure it to match your specific Unraid s
    )
    ```
 
-   Example of customizing the output directory:
+   **IMPORTANT:** Customize the output directory:
    ```bash
-   OUTPUT_BASE_DIR="/mnt/user/data/recovered_files"
+   OUTPUT_BASE_DIR="/mnt/disks/YOUR_OUTPUT_DISK/recovered_files"
+   ```
+   Replace `YOUR_OUTPUT_DISK` with the actual disk or share where you want to store recovered files. 
+   For example, if you want to use a disk with ID "Data1", you might set it to:
+   ```bash
+   OUTPUT_BASE_DIR="/mnt/disks/Data1/recovered_files"
    ```
 
 3. Choose a password handling method:
@@ -58,7 +63,7 @@ Recovered files will be stored in:
 ```
 $OUTPUT_BASE_DIR/<DISK_ID>/
 ```
-Where `<DISK_ID>` is the identifier you specified in the `DISKS` array.
+Where `<DISK_ID>` is the identifier you specified in the `DISKS` array, and `OUTPUT_BASE_DIR` is the custom path you set in the configuration file.
 
 ## Monitoring Progress
 
@@ -67,7 +72,7 @@ The script will output progress information to the console. For long-running ope
 ## Post-Recovery
 
 After recovery:
-1. Review the recovered files in the output directory.
+1. Review the recovered files in your specified output directory.
 2. If needed, run file recovery software on the recovered files to restore file names and directory structure.
 3. If you used `PASSWORD_METHOD="script"`, securely delete the configuration file containing your encryption password or remove the password from it.
 
