@@ -33,6 +33,17 @@ The script uses a configuration file (`config.sh`) to set various parameters. Yo
 
 See `examples/example_config.sh` for a template and `docs/usage.md` for detailed instructions on how to customize each setting, especially the output directory.
 
+## Why Image Post-Processing?
+
+After recovering deleted files, you may find that some image files are unusually large, even though they can be opened and viewed correctly. This is because file recovery tools like `xfs_undelete` may not always know the exact end of a file, leading to the inclusion of extra data beyond the actual image content.
+
+Image post-processing aims to:
+1. Extract the valid image data from these oversized files.
+2. Remove the extraneous data appended during recovery.
+3. Reduce the file sizes to their correct dimensions without losing image quality.
+
+This process can significantly reduce storage requirements and make the recovered images easier to manage and use.
+
 ## Documentation
 
 - [Installation Guide](docs/installation.md)
