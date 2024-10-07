@@ -5,11 +5,12 @@ RECOVERED_BASE_DIR="/input"
 PROCESSED_BASE_DIR="/output"
 
 # Array of disk IDs
+# IMPORTANT: Replace these with your actual disk IDs
 DISK_IDS=(
-  "ZL2KG9X9"
-  "ZL2KG6WF"
-  "WL2068SD"
-  "ZL2PFBXQ"
+  "DISK1"
+  "DISK2"
+  "DISK3"
+  "DISK4"
 )
 
 # Ensure the processed base directory exists

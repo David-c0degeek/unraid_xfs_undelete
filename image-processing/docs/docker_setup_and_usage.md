@@ -62,12 +62,14 @@ docker build -t image_processor:latest .
 - **Volume Mappings:**
   - **Add Path:**
     - **Container Path:** `/input`
-    - **Host Path:** `/mnt/disks/ZVTDW2MH/recovered_files`
+    - **Host Path:** `/mnt/disks/YOUR_RECOVERY_DISK/recovered_files`
   - **Add Path:**
     - **Container Path:** `/output`
-    - **Host Path:** `/mnt/disks/ZVTDW2MH/processed_images`
+    - **Host Path:** `/mnt/disks/YOUR_OUTPUT_DISK/processed_images`
 - **CPU and Memory Limitations:** Adjust if necessary.
 - Click **Apply** to create and start the container.
+
+**IMPORTANT:** Replace `YOUR_RECOVERY_DISK` and `YOUR_OUTPUT_DISK` with the actual names or IDs of your Unraid disks where the recovered files are located and where you want to store the processed images, respectively.
 
 ### 3. Access the Container's Console
 
@@ -84,7 +86,18 @@ nano /app/process_images.sh
 
 #### b. Add the Script Content
 
-Copy and paste the content of the `process_images.sh` file into this file.
+Copy and paste the content of the `process_images.sh` file into this file. Make sure to update the `DISK_IDS` array with your actual disk IDs:
+
+```bash
+DISK_IDS=(
+  "DISK1"
+  "DISK2"
+  "DISK3"
+  "DISK4"
+)
+```
+
+Replace `DISK1`, `DISK2`, etc., with your actual disk identifiers.
 
 #### c. Save and Exit the Editor
 
@@ -116,7 +129,7 @@ chmod +x /app/process_images.sh
 
 ## Customization
 
-- You can modify the `DISK_IDS` array in the `process_images.sh` script to match your specific disk IDs.
+- Modify the `DISK_IDS` array in the `process_images.sh` script to match your specific disk IDs.
 - Adjust the input and output paths in the Docker container configuration if your recovered files are stored in a different location.
 
 ## Troubleshooting
