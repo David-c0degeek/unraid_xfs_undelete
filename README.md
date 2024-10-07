@@ -1,6 +1,12 @@
 # XFS Undelete for Unraid
 
-This project provides a script and documentation for recovering deleted files from encrypted XFS filesystems on Unraid servers.
+This project provides scripts and documentation for recovering deleted files from encrypted and unencrypted XFS filesystems on Unraid servers, as well as post-processing recovered images.
+
+## Features
+
+- Recovers deleted files from XFS filesystems
+- Supports both encrypted and unencrypted disks
+- Optional image post-processing to optimize large recovered images
 
 ## Quick Start
 
@@ -8,12 +14,12 @@ This project provides a script and documentation for recovering deleted files fr
 2. Follow the installation instructions in `docs/installation.md`.
 3. Copy `examples/example_config.sh` to `config.sh` and customize it for your setup.
    - **Important:** Update disk identifiers and paths to match your system.
-   - **Crucial:** Set the `OUTPUT_BASE_DIR` to your desired recovery location.
    - Choose your preferred password handling method (prompt or script).
-4. Run the script:
+4. Run the recovery script:
    ```
    ./recover_deleted_files.sh
    ```
+5. (Optional) For image post-processing, follow the instructions in `image-processing/docs/docker_setup_and_usage.md`.
 
 ## Configuration
 
@@ -32,6 +38,7 @@ See `examples/example_config.sh` for a template and `docs/usage.md` for detailed
 - [Installation Guide](docs/installation.md)
 - [Usage Instructions](docs/usage.md)
 - [Troubleshooting](docs/troubleshooting.md)
+- [Image Post-Processing Guide](image-processing/docs/docker_setup_and_usage.md)
 
 ## Security Warning
 
