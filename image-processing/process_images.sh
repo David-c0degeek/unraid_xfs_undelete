@@ -58,20 +58,29 @@ is_file_corrupt() {
 
     case $type in
         JPEG)
-            if ! identify -format "%m" "$file" &>/dev/null; then
-                log_message "ERROR" "Corrupt JPEG file detected: $file"
+            # Use 'file' command to check if it's a valid JPEG
+            if ! file "$file" | grep -qE "JPEG image data"; then
+                log_message "ERROR" "Invalid JPEG file detected: $file ($(file "$file"))"
                 return 0
+            fi
+            # Additional check using 'identify' with more detailed error logging
+            if ! identify -verbose "$file" > /dev/null 2>&1; then
+                local error_msg=$(identify -verbose "$file" 2>&1)
+                log_message "ERROR" "Potential issues with JPEG file: $file. Error: $error_msg"
+                # Don't return 0 here, just log the potential issue
             fi
             ;;
         PNG)
-            if ! pngcheck "$file" &>/dev/null; then
-                log_message "ERROR" "Corrupt PNG file detected: $file"
+            if ! pngcheck "$file" > /dev/null 2>&1; then
+                local error_msg=$(pngcheck "$file" 2>&1)
+                log_message "ERROR" "Corrupt PNG file detected: $file. Error: $error_msg"
                 return 0
             fi
             ;;
         GIF)
-            if ! gifsicle --info "$file" &>/dev/null; then
-                log_message "ERROR" "Corrupt GIF file detected: $file"
+            if ! gifsicle --info "$file" > /dev/null 2>&1; then
+                local error_msg=$(gifsicle --info "$file" 2>&1)
+                log_message "ERROR" "Corrupt GIF file detected: $file. Error: $error_msg"
                 return 0
             fi
             ;;
@@ -82,9 +91,15 @@ is_file_corrupt() {
 
 # Main processing loop
 for DISK_ID in "${DISK_IDS[@]}"; do
-    log_message "INFO" "Starting processing for disk $DISK_ID"
     RECOVERED_DIR="$RECOVERED_BASE_DIR/$DISK_ID"
     PROCESSED_DIR="$PROCESSED_BASE_DIR/$DISK_ID"
+
+    if [ ! -d "$RECOVERED_DIR" ]; then
+        log_message "ERROR" "Input directory $RECOVERED_DIR does not exist. Skipping disk $DISK_ID."
+        continue
+    fi
+
+    log_message "INFO" "Starting processing for disk $DISK_ID"
 
     # Initialize counters
     total_files=0
@@ -94,86 +109,80 @@ for DISK_ID in "${DISK_IDS[@]}"; do
 
     # Process JPEG images
     log_message "INFO" "Processing JPEG files for disk $DISK_ID"
-    find "$RECOVERED_DIR" -type f \( -iname '*.jpg' -o -iname '*.jpeg' \) -exec sh -c '
-        for file do
-            ((total_files++))
-            output_file="$3${file#$2}"
-            if [ -f "$output_file" ]; then
-                log_message "INFO" "Skipping already processed JPEG $output_file"
-                ((skipped_files++))
-                continue
-            fi
-            if is_file_corrupt "$file" "JPEG"; then
-                ((error_files++))
-                continue
-            fi
-            mkdir -p "$(dirname "$output_file")"
-            if timeout 30s jpegtran -copy all -optimize -perfect "$file" > "$output_file" 2>/dev/null; then
-                log_message "INFO" "Processed JPEG $output_file"
-                ((processed_files++))
-            else
-                rm -f "$output_file"
-                log_message "ERROR" "Failed to process or timed out JPEG $file"
-                ((error_files++))
-            fi
-        done
-    ' sh {} + "$RECOVERED_DIR" "$PROCESSED_DIR"
+    find "$RECOVERED_DIR" -type f \( -iname "*.jpg" -o -iname "*.jpeg" \) -print0 | while IFS= read -r -d '' file; do
+        ((total_files++))
+        output_file="$PROCESSED_DIR${file#$RECOVERED_DIR}"
+        if [ -f "$output_file" ]; then
+            log_message "INFO" "Skipping already processed JPEG $output_file"
+            ((skipped_files++))
+            continue
+        fi
+        if is_file_corrupt "$file" "JPEG"; then
+            ((error_files++))
+            continue
+        fi
+        mkdir -p "$(dirname "$output_file")"
+        if timeout 30s jpegtran -copy all -optimize -perfect "$file" > "$output_file" 2>/dev/null; then
+            log_message "INFO" "Processed JPEG $output_file"
+            ((processed_files++))
+        else
+            rm -f "$output_file"
+            log_message "ERROR" "Failed to process or timed out JPEG $file"
+            ((error_files++))
+        fi
+    done
 
     # Process PNG images
     log_message "INFO" "Processing PNG files for disk $DISK_ID"
-    find "$RECOVERED_DIR" -type f -iname '*.png' -exec sh -c '
-        for file do
-            ((total_files++))
-            output_file="$3${file#$2}"
-            if [ -f "$output_file" ]; then
-                log_message "INFO" "Skipping already processed PNG $output_file"
-                ((skipped_files++))
-                continue
-            fi
-            if is_file_corrupt "$file" "PNG"; then
-                ((error_files++))
-                continue
-            fi
-            mkdir -p "$(dirname "$output_file")"
-            cp "$file" "$output_file"
-            if timeout 30s pngcrush -q -ow "$output_file" 2>/dev/null; then
-                log_message "INFO" "Processed PNG $output_file"
-                ((processed_files++))
-            else
-                rm -f "$output_file"
-                log_message "ERROR" "Failed to process or timed out PNG $file"
-                ((error_files++))
-            fi
-        done
-    ' sh {} + "$RECOVERED_DIR" "$PROCESSED_DIR"
+    find "$RECOVERED_DIR" -type f -iname "*.png" -print0 | while IFS= read -r -d '' file; do
+        ((total_files++))
+        output_file="$PROCESSED_DIR${file#$RECOVERED_DIR}"
+        if [ -f "$output_file" ]; then
+            log_message "INFO" "Skipping already processed PNG $output_file"
+            ((skipped_files++))
+            continue
+        fi
+        if is_file_corrupt "$file" "PNG"; then
+            ((error_files++))
+            continue
+        fi
+        mkdir -p "$(dirname "$output_file")"
+        cp "$file" "$output_file"
+        if timeout 30s pngcrush -q -ow "$output_file" 2>/dev/null; then
+            log_message "INFO" "Processed PNG $output_file"
+            ((processed_files++))
+        else
+            rm -f "$output_file"
+            log_message "ERROR" "Failed to process or timed out PNG $file"
+            ((error_files++))
+        fi
+    done
 
     # Process GIF images
     log_message "INFO" "Processing GIF files for disk $DISK_ID"
-    find "$RECOVERED_DIR" -type f -iname '*.gif' -exec sh -c '
-        for file do
-            ((total_files++))
-            output_file="$3${file#$2}"
-            if [ -f "$output_file" ]; then
-                log_message "INFO" "Skipping already processed GIF $output_file"
-                ((skipped_files++))
-                continue
-            fi
-            if is_file_corrupt "$file" "GIF"; then
-                ((error_files++))
-                continue
-            fi
-            mkdir -p "$(dirname "$output_file")"
-            cp "$file" "$output_file"
-            if timeout 30s gifsicle --batch "$output_file" 2>/dev/null; then
-                log_message "INFO" "Processed GIF $output_file"
-                ((processed_files++))
-            else
-                rm -f "$output_file"
-                log_message "ERROR" "Failed to process or timed out GIF $file"
-                ((error_files++))
-            fi
-        done
-    ' sh {} + "$RECOVERED_DIR" "$PROCESSED_DIR"
+    find "$RECOVERED_DIR" -type f -iname "*.gif" -print0 | while IFS= read -r -d '' file; do
+        ((total_files++))
+        output_file="$PROCESSED_DIR${file#$RECOVERED_DIR}"
+        if [ -f "$output_file" ]; then
+            log_message "INFO" "Skipping already processed GIF $output_file"
+            ((skipped_files++))
+            continue
+        fi
+        if is_file_corrupt "$file" "GIF"; then
+            ((error_files++))
+            continue
+        fi
+        mkdir -p "$(dirname "$output_file")"
+        cp "$file" "$output_file"
+        if timeout 30s gifsicle --batch "$output_file" 2>/dev/null; then
+            log_message "INFO" "Processed GIF $output_file"
+            ((processed_files++))
+        else
+            rm -f "$output_file"
+            log_message "ERROR" "Failed to process or timed out GIF $file"
+            ((error_files++))
+        fi
+    done
 
     # Log summary for this disk
     log_message "SUMMARY" "Disk $DISK_ID processing complete. Total files: $total_files, Processed: $processed_files, Skipped: $skipped_files, Errors: $error_files"
