@@ -35,6 +35,15 @@ RUN apt-get update && apt-get install -y \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
+
+# Copy the processing script into the image
+COPY process_images.sh /app/
+
+# Make the script executable
+RUN chmod +x /app/process_images.sh
+
+# Set the script to run when the container starts
+ENTRYPOINT ["/app/process_images.sh"]
 ```
 
 #### e. Save and Exit the Editor
@@ -120,6 +129,20 @@ chmod +x /app/process_images.sh
 ### 6. Monitor the Output
 
 - The script will display messages indicating the progress and any errors encountered.
+
+### **Additional Tips**
+
+- **Backup Data:**
+  - Always ensure you have backups before running the script.
+
+- **Logging:**
+  - Consider redirecting output to a log file for easier review:
+    ```bash
+    ./process_images.sh | tee processing.log
+    ```
+
+- **Error Handling:**
+  - Review the log for any errors or failed processing attempts.
 
 ## Benefits of Using a Docker Container
 
