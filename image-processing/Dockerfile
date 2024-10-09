@@ -1,18 +1,25 @@
 FROM ubuntu:20.04
 
+# Avoid prompts from apt
+ENV DEBIAN_FRONTEND=noninteractive
+
+# Install required packages
 RUN apt-get update && apt-get install -y \
     libjpeg-turbo-progs \
     pngcrush \
     gifsicle \
+    libjpeg-progs \
+    file \
     && rm -rf /var/lib/apt/lists/*
 
+# Set up working directory
 WORKDIR /app
 
-# Copy the processing script into the image
-COPY process_images.sh /app/
+# Copy the script into the container
+COPY process_images.sh .
 
 # Make the script executable
-RUN chmod +x /app/process_images.sh
+RUN chmod +x process_images.sh
 
-# Set the script to run when the container starts
+# Set the entrypoint to the script
 ENTRYPOINT ["/app/process_images.sh"]
