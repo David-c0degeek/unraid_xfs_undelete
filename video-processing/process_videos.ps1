@@ -1464,6 +1464,70 @@ function Repair-AggressiveRecovery {
     }
 }
 
+function Get-ValidRegions {
+    param (
+        [hashtable]$Analysis
+    )
+    
+    $validRegions = @()
+    
+    try {
+        # Sort corruption points to find valid regions between them
+        $corruptionPoints = @($Analysis.Structure.CorruptedRegions | Select-Object -ExpandProperty Start | Sort-Object)
+        
+        if ($corruptionPoints.Count -eq 0) {
+            # If no corruption points, the whole file is valid
+            $validRegions += @{
+                Start = 0
+                End = $Analysis.FileSize
+                Size = $Analysis.FileSize
+            }
+        }
+        else {
+            # Check region before first corruption
+            if ($corruptionPoints[0] -gt 1024) {
+                $validRegions += @{
+                    Start = 0
+                    End = $corruptionPoints[0]
+                    Size = $corruptionPoints[0]
+                }
+            }
+            
+            # Check regions between corruption points
+            for ($i = 0; $i -lt ($corruptionPoints.Count - 1); $i++) {
+                $start = $corruptionPoints[$i]
+                $end = $corruptionPoints[$i + 1]
+                $size = $end - $start
+                
+                if ($size -gt 1024) {  # Only include regions larger than 1KB
+                    $validRegions += @{
+                        Start = $start
+                        End = $end
+                        Size = $size
+                    }
+                }
+            }
+            
+            # Check region after last corruption
+            $lastPoint = $corruptionPoints[-1]
+            if (($Analysis.FileSize - $lastPoint) -gt 1024) {
+                $validRegions += @{
+                    Start = $lastPoint
+                    End = $Analysis.FileSize
+                    Size = $Analysis.FileSize - $lastPoint
+                }
+            }
+        }
+        
+        Write-LogMessage -Level "INFO" -Message "Found $($validRegions.Count) valid regions" -Detailed
+        return $validRegions
+    }
+    catch {
+        Write-LogMessage -Level "ERROR" -Message "Error getting valid regions: $($_.Exception.Message)" -Detailed
+        return $validRegions
+    }
+}
+
 # Main processing function
 function Process-Video {
     param (
@@ -1480,25 +1544,51 @@ function Process-Video {
             Write-LogMessage -Level "INFO" -Message "Output file already exists, skipping"
             return 1
         }
+
+        # Try simple processing first
+        Write-LogMessage -Level "INFO" -Message "Attempting direct processing first"
+        $process = Start-Process -FilePath "ffmpeg" -ArgumentList @(
+            "-i", "`"$InputFile`"",
+            "-c", "copy",
+            "-y",
+            "`"$OutputFile`""
+        ) -NoNewWindow -PassThru -Wait -RedirectStandardError "$env:TEMP\ffmpeg_error.txt"
+
+        if ($process.ExitCode -eq 0 -and (Test-Path $OutputFile)) {
+            # Verify the output
+            $verifyProcess = Start-Process -FilePath "ffprobe" -ArgumentList @(
+                "-v", "error",
+                "-select_streams", "v:0",
+                "-show_entries", "stream=duration",
+                "-of", "default=noprint_wrappers=1:nokey=1",
+                "`"$OutputFile`""
+            ) -NoNewWindow -PassThru -Wait -RedirectStandardOutput "$env:TEMP\ffprobe_out.txt"
+
+            if ($verifyProcess.ExitCode -eq 0) {
+                $duration = Get-Content "$env:TEMP\ffprobe_out.txt"
+                if ([double]$duration -gt 0) {
+                    Write-LogMessage -Level "SUCCESS" -Message "Direct processing successful"
+                    return 0
+                }
+            }
+            Remove-Item $OutputFile -Force
+        }
+
+        # If direct processing failed, then try recovery
+        if (-not $AttemptRecovery) {
+            Write-LogMessage -Level "ERROR" -Message "Direct processing failed and recovery is disabled"
+            return 2
+        }
+
+        Write-LogMessage -Level "INFO" -Message "Direct processing failed, attempting recovery"
         
-        # Initial analysis
+        # Now do the analysis for recovery
         $analysis = Get-BinaryAnalysis -FilePath $InputFile -DeepScan:$DeepAnalysis
         if (-not $analysis) {
-            Write-LogMessage -Level "ERROR" -Message "Failed to analyze file"
+            Write-LogMessage -Level "ERROR" -Message "Failed to analyze file for recovery"
             return 2
         }
-        
-        # Check if file needs recovery
-        if ($analysis.Recovery.RequiredLevel -eq "None") {
-            # Simple copy or remux
-            return Copy-CleanVideo -InputFile $InputFile -OutputFile $OutputFile
-        }
-        
-        if (-not $AttemptRecovery) {
-            Write-LogMessage -Level "ERROR" -Message "File requires recovery but recovery is disabled"
-            return 2
-        }
-        
+
         # Get recovery methods
         $methods = Get-RecoveryMethod -Analysis $analysis
         
@@ -1521,6 +1611,10 @@ function Process-Video {
     catch {
         Write-LogMessage -Level "ERROR" -Message "Error processing $fileName`: $($_.Exception.Message)"
         return 2
+    }
+    finally {
+        if (Test-Path "$env:TEMP\ffmpeg_error.txt") { Remove-Item "$env:TEMP\ffmpeg_error.txt" -Force }
+        if (Test-Path "$env:TEMP\ffprobe_out.txt") { Remove-Item "$env:TEMP\ffprobe_out.txt" -Force }
     }
 }
 
