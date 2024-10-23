@@ -965,6 +965,180 @@ function Repair-MP4Container {
     }
 }
 
+# Function to generate a new MOOV atom
+function New-EnhancedMOOVAtom {
+    param (
+        [byte[]]$VideoData,
+        [hashtable]$Analysis = $null,
+        [hashtable]$StreamInfo = @{
+            Width = 1920
+            Height = 1080
+            FrameRate = 30
+            TimeScale = 90000
+            AudioPresent = $false
+            AudioCodec = "AAC"
+            AudioChannels = 2
+            AudioSampleRate = 48000
+        }
+    )
+    
+    try {
+        $moov = New-Object System.Collections.ArrayList
+        
+        # MOOV header
+        $moov.AddRange([byte[]]@(0,0,0,0, 0x6D,0x6F,0x6F,0x76))  # size will be updated later, 'moov'
+        
+        # MVHD atom (Movie Header)
+        $mvhd = New-Object System.Collections.ArrayList
+        $mvhd.AddRange([byte[]]@(
+            0,0,0,0,                    # size (placeholder)
+            0x6D,0x76,0x68,0x64,        # 'mvhd'
+            0,0,0,0,                    # version/flags
+            0,0,0,0,                    # creation time
+            0,0,0,0                     # modification time
+        ))
+        
+        # Add timescale (90000 is common for H.264)
+        $timeScaleBytes = [BitConverter]::GetBytes([int32]$StreamInfo.TimeScale)
+        [Array]::Reverse($timeScaleBytes)
+        $mvhd.AddRange($timeScaleBytes)
+        
+        # Duration (estimate 60 seconds if unknown)
+        $durationBytes = [BitConverter]::GetBytes([int32]($StreamInfo.TimeScale * 60))
+        [Array]::Reverse($durationBytes)
+        $mvhd.AddRange($durationBytes)
+        
+        # Rate (1.0 = normal speed)
+        $mvhd.AddRange([byte[]]@(0,1,0,0))
+        
+        # Volume (1.0 = full volume)
+        $mvhd.AddRange([byte[]]@(1,0))
+        
+        # Reserved
+        $mvhd.AddRange([byte[]]@(0,0,0,0,0,0,0,0,0,0))
+        
+        # Matrix structure (identity matrix)
+        $mvhd.AddRange([byte[]]@(
+            0x00,0x01,0x00,0x00,  # a=1.0
+            0x00,0x00,0x00,0x00,  # b=0.0
+            0x00,0x00,0x00,0x00,  # u=0.0
+            0x00,0x00,0x00,0x00,  # c=0.0
+            0x00,0x01,0x00,0x00,  # d=1.0
+            0x00,0x00,0x00,0x00,  # v=0.0
+            0x00,0x00,0x00,0x00,  # x=0.0
+            0x00,0x00,0x00,0x00,  # y=0.0
+            0x40,0x00,0x00,0x00   # w=1.0
+        ))
+        
+        # Preview time, duration, and other defaults
+        $mvhd.AddRange([byte[]]@(
+            0,0,0,0,              # Preview time
+            0,0,0,0,              # Preview duration
+            0,0,0,0,              # Poster time
+            0,0,0,0,              # Selection time
+            0,0,0,0,              # Selection duration
+            0,0,0,0               # Current time
+        ))
+        
+        # Next track ID (start with 1)
+        $mvhd.AddRange([byte[]]@(0,0,0,1))
+        
+        # Update MVHD size
+        $mvhdSize = $mvhd.Count
+        $sizeBytes = [BitConverter]::GetBytes([int32]$mvhdSize)
+        [Array]::Reverse($sizeBytes)
+        for ($i = 0; $i -lt 4; $i++) {
+            $mvhd[0] = $sizeBytes[$i]
+        }
+        
+        # Add MVHD to MOOV
+        $moov.AddRange($mvhd)
+        
+        # Add TRAK atom for video
+        $trak = New-Object System.Collections.ArrayList
+        $trak.AddRange([byte[]]@(
+            0,0,0,0,              # size (placeholder)
+            0x74,0x72,0x61,0x6B   # 'trak'
+        ))
+        
+        # Add video track header (TKHD)
+        $tkhd = New-Object System.Collections.ArrayList
+        $tkhd.AddRange([byte[]]@(
+            0,0,0,0,              # size (placeholder)
+            0x74,0x6B,0x68,0x64,  # 'tkhd'
+            0,0,0,3,              # version & flags (track enabled)
+            0,0,0,0,              # creation time
+            0,0,0,0,              # modification time
+            0,0,0,1,              # track ID
+            0,0,0,0,              # reserved
+            0,0,0,0               # duration (same as movie)
+        ))
+        
+        # Add video dimensions
+        $widthBytes = [BitConverter]::GetBytes([int32]$StreamInfo.Width)
+        $heightBytes = [BitConverter]::GetBytes([int32]$StreamInfo.Height)
+        [Array]::Reverse($widthBytes)
+        [Array]::Reverse($heightBytes)
+        $tkhd.AddRange($widthBytes)
+        $tkhd.AddRange($heightBytes)
+        
+        # Update TKHD size
+        $tkhdSize = $tkhd.Count
+        $sizeBytes = [BitConverter]::GetBytes([int32]$tkhdSize)
+        [Array]::Reverse($sizeBytes)
+        for ($i = 0; $i -lt 4; $i++) {
+            $tkhd[$i] = $sizeBytes[$i]
+        }
+        
+        # Add TKHD to TRAK
+        $trak.AddRange($tkhd)
+        
+        # Update TRAK size
+        $trakSize = $trak.Count
+        $sizeBytes = [BitConverter]::GetBytes([int32]$trakSize)
+        [Array]::Reverse($sizeBytes)
+        for ($i = 0; $i -lt 4; $i++) {
+            $trak[$i] = $sizeBytes[$i]
+        }
+        
+        # Add TRAK to MOOV
+        $moov.AddRange($trak)
+        
+        # Add audio track if present
+        if ($StreamInfo.AudioPresent) {
+            # Add audio TRAK structure (simplified for this example)
+            $audioTrak = New-Object System.Collections.ArrayList
+            $audioTrak.AddRange([byte[]]@(
+                0,0,0,0,              # size (placeholder)
+                0x74,0x72,0x61,0x6B   # 'trak'
+            ))
+            
+            # Update audio TRAK size and add to MOOV
+            $audioTrakSize = $audioTrak.Count
+            $sizeBytes = [BitConverter]::GetBytes([int32]$audioTrakSize)
+            [Array]::Reverse($sizeBytes)
+            for ($i = 0; $i -lt 4; $i++) {
+                $audioTrak[$i] = $sizeBytes[$i]
+            }
+            $moov.AddRange($audioTrak)
+        }
+        
+        # Update final MOOV size
+        $moovSize = $moov.Count
+        $sizeBytes = [BitConverter]::GetBytes([int32]$moovSize)
+        [Array]::Reverse($sizeBytes)
+        for ($i = 0; $i -lt 4; $i++) {
+            $moov[$i] = $sizeBytes[$i]
+        }
+        
+        return $moov.ToArray()
+    }
+    catch {
+        Write-LogMessage -Level "ERROR" -Message "Error generating MOOV atom: $($_.Exception.Message)"
+        return $null
+    }
+}
+
 # Stream extraction and reconstruction
 function Repair-StreamExtraction {
     param (
