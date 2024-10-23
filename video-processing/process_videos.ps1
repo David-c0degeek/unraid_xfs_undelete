@@ -1,49 +1,157 @@
-# Advanced Video Processing Script with Maximum Recovery Options
+# Advanced Video Processing and Recovery Script
+
 param (
     [string]$InputPath = ".\input",
     [string]$OutputPath = ".\output",
-    [switch]$AttemptRecovery = $true,
     [string]$TempDir = "$env:TEMP\VideoRecovery",
-    [int]$MaxRetries = 3
+    [switch]$AttemptRecovery = $true,
+    [int]$MaxRetries = 3,
+    [switch]$DeepAnalysis = $true,
+    [switch]$AggressiveRecovery = $true,
+    [int]$Verbosity = 2  # 0=minimal, 1=normal, 2=detailed
 )
 
+# Global configuration
+$Global:Config = @{
+    VideoTimeout = 7200        # 2 hour timeout
+    MaxJobs = 1               # Single job for stability
+    RecoveryAttempts = 12     # Increased recovery methods
+    ChunkSize = 1024 * 1024   # 1MB chunks for processing
+    MinValidSize = 1024       # Minimum valid file size
+    MaxCorruptedRegions = 10  # Maximum corrupted regions to process
+    BufferSize = 8192         # Read buffer size
+    MaxAnalysisSize = 1GB     # Maximum size for deep analysis
+}
+
 # Initialize logging
-$ErrorLogPath = ".\video_error_log.txt"
-$ProcessLogPath = ".\video_process_log.txt"
-$SummaryLogPath = ".\video_summary_log.txt"
-$RecoveryLogPath = ".\recovery_log.txt"
-$DetailedRecoveryPath = ".\detailed_recovery_log.txt"
+$Global:LogPaths = @{
+    Error = ".\video_error_log.txt"
+    Process = ".\video_process_log.txt"
+    Summary = ".\video_summary_log.txt"
+    Recovery = ".\recovery_log.txt"
+    Detailed = ".\detailed_recovery_log.txt"
+    Analysis = ".\analysis_log.txt"
+    Debug = ".\debug_log.txt"
+}
 
-# Video processing settings
-$VideoTimeout = 7200  # 2 hour timeout for complex recovery
-$MaxJobs = 1         # Single job for maximum stability
-$RecoveryAttempts = 8 # Increased number of recovery methods
-
-# Create necessary directories
-$null = New-Item -ItemType Directory -Force -Path $OutputPath
-$null = New-Item -ItemType Directory -Force -Path $TempDir
-
-# Function to handle existing logs
-function Initialize-LogFile {
-    param (
-        [string]$LogPath
-    )
-    
-    if (Test-Path $LogPath) {
-        $timestamp = Get-Date -Format "yyyyMMdd_HHmmss"
-        $backupPath = [System.IO.Path]::ChangeExtension($LogPath, ".$timestamp.txt")
-        Move-Item -Path $LogPath -Destination $backupPath
-        Write-Host "Existing log file backed up to $backupPath"
+# Codec and container signatures
+$Global:MediaSignatures = @{
+    Containers = @{
+        MP4 = @{
+            Signatures = @(
+                @{ Name = "ftyp"; Hex = @(0x66, 0x74, 0x79, 0x70) }
+                @{ Name = "moov"; Hex = @(0x6D, 0x6F, 0x6F, 0x76) }
+                @{ Name = "mdat"; Hex = @(0x6D, 0x64, 0x61, 0x74) }
+                @{ Name = "free"; Hex = @(0x66, 0x72, 0x65, 0x65) }
+                @{ Name = "wide"; Hex = @(0x77, 0x69, 0x64, 0x65) }
+            )
+            RequiredAtoms = @("ftyp", "moov", "mdat")
+        }
+        MKV = @{
+            Signatures = @(
+                @{ Name = "EBML"; Hex = @(0x1A, 0x45, 0xDF, 0xA3) }
+                @{ Name = "Segment"; Hex = @(0x18, 0x53, 0x80, 0x67) }
+            )
+        }
+        AVI = @{
+            Signatures = @(
+                @{ Name = "RIFF"; Hex = @(0x52, 0x49, 0x46, 0x46) }
+                @{ Name = "AVI "; Hex = @(0x41, 0x56, 0x49, 0x20) }
+            )
+        }
     }
-    New-Item -ItemType File -Force -Path $LogPath | Out-Null
+    VideoCodecs = @{
+        H264 = @{
+            StartCodes = @(
+                @(0x00, 0x00, 0x00, 0x01),
+                @(0x00, 0x00, 0x01)
+            )
+            NALTypes = @{
+                1  = "P-Frame"
+                5  = "I-Frame"
+                6  = "SEI"
+                7  = "SPS"
+                8  = "PPS"
+                9  = "AUD"
+            }
+        }
+        H265 = @{
+            StartCodes = @(
+                @(0x00, 0x00, 0x00, 0x01),
+                @(0x00, 0x00, 0x01)
+            )
+            NALTypes = @{
+                1  = "P-Frame"
+                19 = "I-Frame"
+                32 = "VPS"
+                33 = "SPS"
+                34 = "PPS"
+            }
+        }
+        MPEG2 = @{
+            StartCodes = @(
+                @(0x00, 0x00, 0x01, 0xB3),
+                @(0x00, 0x00, 0x01, 0x00)
+            )
+        }
+        MPEG4 = @{
+            StartCodes = @(
+                @(0x00, 0x00, 0x01, 0xB6),
+                @(0x00, 0x00, 0x01, 0xB3)
+            )
+        }
+    }
+    AudioCodecs = @{
+        AAC = @{
+            Signatures = @(
+                @(0xFF, 0xF1),
+                @(0xFF, 0xF9)
+            )
+        }
+        MP3 = @{
+            Signatures = @(
+                @(0xFF, 0xFB),
+                @(0xFF, 0xFA)
+            )
+        }
+    }
 }
 
-# Initialize all log files
-@($ErrorLogPath, $ProcessLogPath, $SummaryLogPath, $RecoveryLogPath, $DetailedRecoveryPath) | ForEach-Object {
-    Initialize-LogFile $_
+# Initialize script environment
+function Initialize-Environment {
+    try {
+        # Create necessary directories
+        @($OutputPath, $TempDir) | ForEach-Object {
+            if (-not (Test-Path $_)) {
+                New-Item -ItemType Directory -Force -Path $_ | Out-Null
+            }
+        }
+
+        # Initialize log files
+        foreach ($logPath in $Global:LogPaths.Values) {
+            if (Test-Path $logPath) {
+                $timestamp = Get-Date -Format "yyyyMMdd_HHmmss"
+                $backupPath = [System.IO.Path]::ChangeExtension($logPath, ".$timestamp.txt")
+                Move-Item -Path $logPath -Destination $backupPath -Force
+            }
+            "" | Set-Content $logPath
+        }
+
+        # Verify FFmpeg installation
+        if (-not (Test-FFmpeg)) {
+            throw "FFmpeg is not installed or not in PATH"
+        }
+
+        Write-LogMessage -Level "INFO" -Message "Environment initialized successfully" -Detailed
+        return $true
+    }
+    catch {
+        Write-LogMessage -Level "ERROR" -Message "Failed to initialize environment: $($_.Exception.Message)"
+        return $false
+    }
 }
 
-# Enhanced logging function
+# Base logging function
 function Write-LogMessage {
     param (
         [string]$Level,
@@ -54,26 +162,34 @@ function Write-LogMessage {
     $timestamp = Get-Date -Format "yyyy-MM-dd HH:mm:ss"
     $logMessage = "[$timestamp] [$Level] $Message"
     
-    Write-Host $logMessage
-    Add-Content -Path $ProcessLogPath -Value $logMessage
+    # Console output based on verbosity
+    switch ($Level) {
+        "ERROR" { Write-Host $logMessage -ForegroundColor Red }
+        "WARNING" { Write-Host $logMessage -ForegroundColor Yellow }
+        "SUCCESS" { Write-Host $logMessage -ForegroundColor Green }
+        default { Write-Host $logMessage }
+    }
+    
+    # File logging
+    Add-Content -Path $Global:LogPaths.Process -Value $logMessage
     
     switch ($Level) {
-        "ERROR" {
-            Add-Content -Path $ErrorLogPath -Value "[$timestamp] $Message"
-        }
-        "SUMMARY" {
-            Add-Content -Path $SummaryLogPath -Value "[$timestamp] $Message"
-        }
-        "RECOVERY" {
-            Add-Content -Path $RecoveryLogPath -Value "[$timestamp] $Message"
+        "ERROR" { Add-Content -Path $Global:LogPaths.Error -Value $logMessage }
+        "SUMMARY" { Add-Content -Path $Global:LogPaths.Summary -Value $logMessage }
+        "RECOVERY" { 
+            Add-Content -Path $Global:LogPaths.Recovery -Value $logMessage
             if ($Detailed) {
-                Add-Content -Path $DetailedRecoveryPath -Value "[$timestamp] $Message"
+                Add-Content -Path $Global:LogPaths.Detailed -Value $logMessage
             }
         }
     }
+    
+    if ($Detailed -and $Verbosity -ge 2) {
+        Add-Content -Path $Global:LogPaths.Debug -Value $logMessage
+    }
 }
 
-# Function to check FFmpeg existence
+# FFmpeg verification function
 function Test-FFmpeg {
     try {
         $ffmpegVersion = & ffmpeg -version
@@ -82,76 +198,599 @@ function Test-FFmpeg {
         return $true
     }
     catch {
-        Write-LogMessage -Level "ERROR" -Message "FFmpeg/FFprobe not found in PATH. Please install FFmpeg and add it to your system PATH."
+        Write-LogMessage -Level "ERROR" -Message "FFmpeg/FFprobe not found in PATH"
         return $false
     }
 }
 
-# Function to analyze error type
-function Get-VideoErrorType {
+# Binary pattern search function
+function Find-BinaryPattern {
     param (
-        [string]$FilePath,
-        [string]$ErrorText
+        [byte[]]$Bytes,
+        [byte[]]$Pattern,
+        [int]$StartOffset = 0,
+        [int]$MaxMatches = 0
     )
     
-    $errorTypes = @()
+    $matches = New-Object System.Collections.ArrayList
+    $patternLength = $Pattern.Length
+    $searchLength = $Bytes.Length - $patternLength
     
-    if ($ErrorText -match "moov atom not found") {
-        $errorTypes += "MISSING_INDEX"
-    }
-    if ($ErrorText -match "Invalid NAL unit size") {
-        $errorTypes += "CORRUPT_STREAM"
-    }
-    if ($ErrorText -match "partial file") {
-        $errorTypes += "PARTIAL_FILE"
-    }
-    if ($ErrorText -match "Error splitting the input into NAL units") {
-        $errorTypes += "NAL_ERROR"
-    }
-    if ($ErrorText -match "Invalid data found when processing input") {
-        $errorTypes += "INVALID_DATA"
-    }
-    
-    # Additional checks
-    try {
-        $fileSize = (Get-Item $FilePath).Length
-        if ($fileSize -lt 1024) {
-            $errorTypes += "TOO_SMALL"
+    for ($i = $StartOffset; $i -lt $searchLength; $i++) {
+        $found = $true
+        for ($j = 0; $j -lt $patternLength; $j++) {
+            if ($Bytes[$i + $j] -ne $Pattern[$j]) {
+                $found = $false
+                break
+            }
         }
-        
-        # Check for zero bytes in the first 512 bytes
-        $bytes = [System.IO.File]::ReadAllBytes($FilePath)[0..511]
-        if ($bytes.Count -gt 0 -and ($bytes | Where-Object { $_ -eq 0 }).Count -gt 100) {
-            $errorTypes += "ZERO_BYTES"
+        if ($found) {
+            $null = $matches.Add($i)
+            if ($MaxMatches -gt 0 -and $matches.Count -ge $MaxMatches) {
+                break
+            }
         }
     }
-    catch {
-        $errorTypes += "FILE_ACCESS_ERROR"
-    }
     
-    if ($errorTypes.Count -eq 0) {
-        $errorTypes += "UNKNOWN"
-    }
-    
-    return $errorTypes
+    return $matches
 }
 
-# Function to extract raw H264 stream
-function Export-RawStream {
+# Enhanced binary analysis function
+function Get-BinaryAnalysis {
+    param (
+        [string]$FilePath,
+        [switch]$DeepScan
+    )
+    
+    try {
+        Write-LogMessage -Level "INFO" -Message "Starting binary analysis of $FilePath" -Detailed
+        
+        $fileInfo = Get-Item $FilePath
+        $analysis = @{
+            FilePath = $FilePath
+            FileSize = $fileInfo.Length
+            LastWriteTime = $fileInfo.LastWriteTime
+            Signatures = @{
+                Container = @()
+                Video = @()
+                Audio = @()
+            }
+            Structure = @{
+                ValidRegions = @()
+                CorruptedRegions = @()
+                Atoms = @()
+                NALUnits = @()
+            }
+            Streams = @{
+                Video = @()
+                Audio = @()
+            }
+            Metadata = @{
+                Container = $null
+                VideoCodec = $null
+                AudioCodec = $null
+                Duration = 0
+                BitRate = 0
+            }
+            Recovery = @{
+                RequiredLevel = "None"
+                PossibleMethods = @()
+                CorruptionType = @()
+            }
+        }
+
+        # Create file reader with buffering
+        $bufferSize = $Global:Config.BufferSize
+        $fileStream = [System.IO.File]::OpenRead($FilePath)
+        $reader = New-Object System.IO.BinaryReader($fileStream)
+        
+        # Initial container detection
+        foreach ($containerType in $Global:MediaSignatures.Containers.Keys) {
+            $signatures = $Global:MediaSignatures.Containers[$containerType].Signatures
+            
+            foreach ($sig in $signatures) {
+                $matches = Find-BinaryPattern -Bytes ($reader.ReadBytes([Math]::Min($fileInfo.Length, 1MB))) -Pattern $sig.Hex
+                if ($matches.Count -gt 0) {
+                    $analysis.Signatures.Container += @{
+                        Type = $containerType
+                        Name = $sig.Name
+                        Offset = $matches[0]
+                        Signature = $sig.Hex
+                    }
+                }
+                $fileStream.Position = 0
+            }
+        }
+
+        # Determine container type
+        if ($analysis.Signatures.Container.Count -gt 0) {
+            $analysis.Metadata.Container = $analysis.Signatures.Container[0].Type
+            Write-LogMessage -Level "INFO" -Message "Detected container type: $($analysis.Metadata.Container)" -Detailed
+        }
+
+        # Scan for codec signatures
+        $scanSize = [Math]::Min($fileInfo.Length, 10MB)
+        $scanBuffer = $reader.ReadBytes($scanSize)
+        
+        # Video codec detection
+        foreach ($codec in $Global:MediaSignatures.VideoCodecs.Keys) {
+            $startCodes = $Global:MediaSignatures.VideoCodecs[$codec].StartCodes
+            
+            foreach ($startCode in $startCodes) {
+                $matches = Find-BinaryPattern -Bytes $scanBuffer -Pattern $startCode -MaxMatches 5
+                if ($matches.Count -gt 0) {
+                    $analysis.Signatures.Video += @{
+                        Codec = $codec
+                        Matches = $matches.Count
+                        FirstOffset = $matches[0]
+                    }
+                    if (-not $analysis.Metadata.VideoCodec) {
+                        $analysis.Metadata.VideoCodec = $codec
+                    }
+                }
+            }
+        }
+
+        # Audio codec detection
+        foreach ($codec in $Global:MediaSignatures.AudioCodecs.Keys) {
+            $signatures = $Global:MediaSignatures.AudioCodecs[$codec].Signatures
+            
+            foreach ($sig in $signatures) {
+                $matches = Find-BinaryPattern -Bytes $scanBuffer -Pattern $sig -MaxMatches 5
+                if ($matches.Count -gt 0) {
+                    $analysis.Signatures.Audio += @{
+                        Codec = $codec
+                        Matches = $matches.Count
+                        FirstOffset = $matches[0]
+                    }
+                    if (-not $analysis.Metadata.AudioCodec) {
+                        $analysis.Metadata.AudioCodec = $codec
+                    }
+                }
+            }
+        }
+
+        # Deep analysis if requested
+        if ($DeepScan) {
+            Write-LogMessage -Level "INFO" -Message "Performing deep scan analysis" -Detailed
+            
+            # Analyze file structure
+            switch ($analysis.Metadata.Container) {
+                "MP4" { $analysis.Structure = Get-MP4Structure -Reader $reader }
+                "MKV" { $analysis.Structure = Get-MKVStructure -Reader $reader }
+                "AVI" { $analysis.Structure = Get-AVIStructure -Reader $reader }
+            }
+
+            # NAL unit analysis for H264/H265
+            if ($analysis.Metadata.VideoCodec -in @("H264", "H265")) {
+                $analysis.Structure.NALUnits = Get-NALUnits -Reader $reader -Codec $analysis.Metadata.VideoCodec
+            }
+
+            # Corruption detection
+            $analysis.Structure.CorruptedRegions = Find-CorruptedRegions -Reader $reader -Analysis $analysis
+            
+            # Calculate valid regions
+            $analysis.Structure.ValidRegions = Get-ValidRegions -Analysis $analysis
+            
+            # Determine recovery requirements
+            $analysis.Recovery = Get-RecoveryRequirements -Analysis $analysis
+        }
+
+        Write-LogMessage -Level "INFO" -Message "Binary analysis completed" -Detailed
+        return $analysis
+    }
+    catch {
+        Write-LogMessage -Level "ERROR" -Message "Error during binary analysis: $($_.Exception.Message)" -Detailed
+        return $null
+    }
+    finally {
+        if ($reader) { $reader.Dispose() }
+        if ($fileStream) { $fileStream.Dispose() }
+    }
+}
+
+# MP4 structure analysis
+function Get-MP4Structure {
+    param (
+        [System.IO.BinaryReader]$Reader
+    )
+    
+    $structure = @{
+        Atoms = @()
+        Hierarchy = @{}
+        ValidAtoms = 0
+        InvalidAtoms = 0
+    }
+    
+    try {
+        $reader.BaseStream.Position = 0
+        $fileSize = $reader.BaseStream.Length
+        
+        while ($reader.BaseStream.Position -lt $fileSize) {
+            $atomStart = $reader.BaseStream.Position
+            
+            # Read atom size and type
+            if ($reader.BaseStream.Length - $reader.BaseStream.Position < 8) {
+                break
+            }
+            
+            $atomSize = [System.Net.IPAddress]::NetworkToHostOrder($reader.ReadInt32())
+            $atomType = [System.Text.Encoding]::ASCII.GetString($reader.ReadBytes(4))
+            
+            # Validate atom
+            $isValid = $true
+            if ($atomSize -lt 8 -or $atomSize -gt ($fileSize - $atomStart)) {
+                $isValid = $false
+                $atomSize = 8 # Minimum atom size
+            }
+            
+            $structure.Atoms += @{
+                Type = $atomType
+                Offset = $atomStart
+                Size = $atomSize
+                IsValid = $isValid
+            }
+            
+            if ($isValid) {
+                $structure.ValidAtoms++
+            }
+            else {
+                $structure.InvalidAtoms++
+            }
+            
+            # Position reader at next atom
+            $reader.BaseStream.Position = $atomStart + $atomSize
+        }
+        
+        return $structure
+    }
+    catch {
+        Write-LogMessage -Level "ERROR" -Message "Error analyzing MP4 structure: $($_.Exception.Message)" -Detailed
+        return $structure
+    }
+}
+
+# NAL unit analysis
+function Get-NALUnits {
+    param (
+        [System.IO.BinaryReader]$Reader,
+        [string]$Codec
+    )
+    
+    $nalUnits = @()
+    $startCodes = $Global:MediaSignatures.VideoCodecs[$Codec].StartCodes
+    $nalTypes = $Global:MediaSignatures.VideoCodecs[$Codec].NALTypes
+    
+    try {
+        $reader.BaseStream.Position = 0
+        $fileSize = $reader.BaseStream.Length
+        $buffer = New-Object byte[] $Global:Config.BufferSize
+        
+        while ($reader.BaseStream.Position -lt $fileSize) {
+            $bytesRead = $reader.Read($buffer, 0, $buffer.Length)
+            if ($bytesRead -lt 4) { break }
+            
+            foreach ($startCode in $startCodes) {
+                $matches = Find-BinaryPattern -Bytes $buffer -Pattern $startCode
+                
+                foreach ($offset in $matches) {
+                    if ($offset + $startCode.Length -lt $bytesRead) {
+                        $nalType = $buffer[$offset + $startCode.Length] -band 0x1F
+                        
+                        $nalUnits += @{
+                            Offset = $reader.BaseStream.Position - $bytesRead + $offset
+                            Type = $nalTypes[$nalType]
+                            StartCode = $startCode
+                            Size = 0  # Will be calculated in post-processing
+                        }
+                    }
+                }
+            }
+        }
+        
+        # Post-process NAL units to calculate sizes
+        for ($i = 0; $i -lt $nalUnits.Count - 1; $i++) {
+            $nalUnits[$i].Size = $nalUnits[$i + 1].Offset - $nalUnits[$i].Offset
+        }
+        if ($nalUnits.Count -gt 0) {
+            $nalUnits[-1].Size = $fileSize - $nalUnits[-1].Offset
+        }
+        
+        return $nalUnits
+    }
+    catch {
+        Write-LogMessage -Level "ERROR" -Message "Error analyzing NAL units: $($_.Exception.Message)" -Detailed
+        return $nalUnits
+    }
+}
+
+# Corruption detection
+function Find-CorruptedRegions {
+    param (
+        [System.IO.BinaryReader]$Reader,
+        [hashtable]$Analysis
+    )
+    
+    $corruptedRegions = @()
+    
+    try {
+        $reader.BaseStream.Position = 0
+        $fileSize = $reader.BaseStream.Length
+        $chunkSize = $Global:Config.ChunkSize
+        $buffer = New-Object byte[] $chunkSize
+        
+        Write-LogMessage -Level "INFO" -Message "Scanning for corrupted regions..." -Detailed
+        
+        $position = 0
+        $consecutiveZeros = 0
+        $corruptionStart = -1
+        
+        while ($position -lt $fileSize) {
+            $bytesRead = $reader.Read($buffer, 0, [Math]::Min($chunkSize, $fileSize - $position))
+            if ($bytesRead -eq 0) { break }
+            
+            # Analyze chunk for corruption patterns
+            for ($i = 0; $i -lt $bytesRead; $i++) {
+                # Pattern 1: Long sequences of zeros
+                if ($buffer[$i] -eq 0) {
+                    $consecutiveZeros++
+                    if ($consecutiveZeros -eq 1024 -and $corruptionStart -eq -1) {
+                        $corruptionStart = $position + $i - 1023
+                    }
+                }
+                else {
+                    if ($consecutiveZeros -ge 1024) {
+                        $corruptedRegions += @{
+                            Start = $corruptionStart
+                            End = $position + $i
+                            Type = "ZeroSequence"
+                            Size = ($position + $i) - $corruptionStart
+                        }
+                    }
+                    $consecutiveZeros = 0
+                    $corruptionStart = -1
+                }
+                
+                # Pattern 2: Invalid atom sizes (for MP4)
+                if ($Analysis.Metadata.Container -eq "MP4" -and $i -le $bytesRead - 8) {
+                    $potentialSize = [BitConverter]::ToUInt32($buffer[$i..($i+3)], 0)
+                    if ($potentialSize -gt 0 -and $potentialSize -lt 8) {
+                        $corruptedRegions += @{
+                            Start = $position + $i
+                            End = $position + $i + 8
+                            Type = "InvalidAtomSize"
+                            Size = 8
+                        }
+                    }
+                }
+            }
+            
+            $position += $bytesRead
+        }
+        
+        # Merge overlapping regions
+        if ($corruptedRegions.Count -gt 1) {
+            $mergedRegions = @($corruptedRegions[0])
+            for ($i = 1; $i -lt $corruptedRegions.Count; $i++) {
+                $current = $corruptedRegions[$i]
+                $previous = $mergedRegions[-1]
+                
+                if ($current.Start -le $previous.End) {
+                    $previous.End = [Math]::Max($current.End, $previous.End)
+                    $previous.Size = $previous.End - $previous.Start
+                    $previous.Type = "Mixed"
+                }
+                else {
+                    $mergedRegions += $current
+                }
+            }
+            $corruptedRegions = $mergedRegions
+        }
+        
+        Write-LogMessage -Level "INFO" -Message "Found $($corruptedRegions.Count) corrupted regions" -Detailed
+        
+        return $corruptedRegions
+    }
+    catch {
+        Write-LogMessage -Level "ERROR" -Message "Error detecting corrupted regions: $($_.Exception.Message)" -Detailed
+        return $corruptedRegions
+    }
+}
+
+# Recovery requirements analysis
+function Get-RecoveryRequirements {
+    param (
+        [hashtable]$Analysis
+    )
+    
+    $requirements = @{
+        RequiredLevel = "None"
+        PossibleMethods = @()
+        CorruptionType = @()
+        Priority = 0
+    }
+    
+    # Analyze container integrity
+    if ($Analysis.Metadata.Container) {
+        $requiredAtoms = $Global:MediaSignatures.Containers[$Analysis.Metadata.Container].RequiredAtoms
+        $missingAtoms = @()
+        
+        if ($requiredAtoms) {
+            $foundAtoms = $Analysis.Structure.Atoms | ForEach-Object { $_.Type }
+            $missingAtoms = $requiredAtoms | Where-Object { $_ -notin $foundAtoms }
+        }
+        
+        if ($missingAtoms.Count -gt 0) {
+            $requirements.CorruptionType += "MissingAtoms"
+            $requirements.PossibleMethods += "ContainerReconstruction"
+            $requirements.Priority = [Math]::Max($requirements.Priority, 2)
+        }
+    }
+    
+    # Analyze stream integrity
+    if ($Analysis.Structure.NALUnits.Count -eq 0 -and $Analysis.Metadata.VideoCodec -in @("H264", "H265")) {
+        $requirements.CorruptionType += "NoNALUnits"
+        $requirements.PossibleMethods += "StreamReconstruction"
+        $requirements.Priority = [Math]::Max($requirements.Priority, 3)
+    }
+    
+    # Analyze corruption level
+    $corruptedSize = ($Analysis.Structure.CorruptedRegions | Measure-Object -Property Size -Sum).Sum
+    if ($corruptedSize) {
+        $corruptionPercentage = ($corruptedSize / $Analysis.FileSize) * 100
+        
+        if ($corruptionPercentage -gt 50) {
+            $requirements.CorruptionType += "SevereCorruption"
+            $requirements.PossibleMethods += "DeepRecovery"
+            $requirements.Priority = [Math]::Max($requirements.Priority, 4)
+        }
+        elseif ($corruptionPercentage -gt 20) {
+            $requirements.CorruptionType += "ModerateCorruption"
+            $requirements.PossibleMethods += "StandardRecovery"
+            $requirements.Priority = [Math]::Max($requirements.Priority, 2)
+        }
+        else {
+            $requirements.CorruptionType += "MinorCorruption"
+            $requirements.PossibleMethods += "LightRecovery"
+            $requirements.Priority = [Math]::Max($requirements.Priority, 1)
+        }
+    }
+    
+    # Set required level based on priority
+    $requirements.RequiredLevel = switch ($requirements.Priority) {
+        0 { "None" }
+        1 { "Light" }
+        2 { "Standard" }
+        3 { "Heavy" }
+        4 { "Critical" }
+        default { "Unknown" }
+    }
+    
+    return $requirements
+}
+
+# Recovery method selection
+function Get-RecoveryMethod {
+    param (
+        [hashtable]$Analysis
+    )
+    
+    $recoveryMethods = @()
+    
+    # Add methods based on corruption type and container
+    switch ($Analysis.Recovery.RequiredLevel) {
+        "Light" {
+            $recoveryMethods += @(
+                @{
+                    Name = "QuickFix"
+                    Function = "Repair-QuickFix"
+                    Priority = 1
+                }
+            )
+        }
+        "Standard" {
+            $recoveryMethods += @(
+                @{
+                    Name = "ContainerRepair"
+                    Function = "Repair-Container"
+                    Priority = 2
+                }
+                @{
+                    Name = "StreamExtraction"
+                    Function = "Repair-StreamExtraction"
+                    Priority = 3
+                }
+            )
+        }
+        "Heavy" {
+            $recoveryMethods += @(
+                @{
+                    Name = "DeepRecovery"
+                    Function = "Repair-DeepRecovery"
+                    Priority = 4
+                }
+                @{
+                    Name = "NALReconstruction"
+                    Function = "Repair-NALReconstruction"
+                    Priority = 4
+                }
+            )
+        }
+        "Critical" {
+            $recoveryMethods += @(
+                @{
+                    Name = "AggressiveRecovery"
+                    Function = "Repair-AggressiveRecovery"
+                    Priority = 5
+                }
+                @{
+                    Name = "BinaryReconstruction"
+                    Function = "Repair-BinaryReconstruction"
+                    Priority = 5
+                }
+                @{
+                    Name = "FragmentRecovery"
+                    Function = "Repair-Fragments"
+                    Priority = 5
+                }
+            )
+        }
+    }
+    
+    # Add container-specific methods
+    switch ($Analysis.Metadata.Container) {
+        "MP4" {
+            $recoveryMethods += @{
+                Name = "MP4Repair"
+                Function = "Repair-MP4Container"
+                Priority = [Math]::Min($Analysis.Recovery.Priority + 1, 5)
+            }
+        }
+        "MKV" {
+            $recoveryMethods += @{
+                Name = "MKVRepair"
+                Function = "Repair-MKVContainer"
+                Priority = [Math]::Min($Analysis.Recovery.Priority + 1, 5)
+            }
+        }
+    }
+    
+    # Sort methods by priority
+    return $recoveryMethods | Sort-Object -Property Priority
+}
+
+# Quick fix recovery
+function Repair-QuickFix {
     param (
         [string]$InputFile,
         [string]$OutputFile,
-        [string]$StreamType = "video"
+        [hashtable]$Analysis
     )
     
     try {
-        $mapOption = if ($StreamType -eq "video") { "-vcodec copy -an" } else { "-acodec copy -vn" }
-        $format = if ($StreamType -eq "video") { "h264" } else { "adts" }
+        Write-LogMessage -Level "RECOVERY" -Message "Attempting quick fix recovery" -Detailed
         
+        # Try simple remux first
         $process = Start-Process -FilePath "ffmpeg" -ArgumentList @(
+            "-err_detect", "ignore_err",
             "-i", "`"$InputFile`"",
-            "-f", $format
-            $mapOption.Split(" ")
+            "-c", "copy",
+            "-movflags", "+faststart",
+            "-y",
+            "`"$OutputFile`""
+        ) -NoNewWindow -PassThru -Wait -RedirectStandardError "$env:TEMP\ffmpeg_error.txt"
+        
+        if ($process.ExitCode -eq 0) {
+            Write-LogMessage -Level "RECOVERY" -Message "Quick fix successful" -Detailed
+            return $true
+        }
+        
+        # If simple remux fails, try with error concealment
+        $process = Start-Process -FilePath "ffmpeg" -ArgumentList @(
+            "-fflags", "+genpts+discardcorrupt",
+            "-i", "`"$InputFile`"",
+            "-c", "copy",
+            "-movflags", "+faststart",
             "-y",
             "`"$OutputFile`""
         ) -NoNewWindow -PassThru -Wait -RedirectStandardError "$env:TEMP\ffmpeg_error.txt"
@@ -159,587 +798,715 @@ function Export-RawStream {
         return $process.ExitCode -eq 0
     }
     catch {
+        Write-LogMessage -Level "ERROR" -Message "Quick fix failed: $($_.Exception.Message)" -Detailed
         return $false
     }
 }
 
-# Function to analyze frame corruption
-function Get-FrameAnalysis {
+# Container repair function
+function Repair-Container {
     param (
-        [string]$InputFile
+        [string]$InputFile,
+        [string]$OutputFile,
+        [hashtable]$Analysis
     )
     
     try {
-        $frameInfo = & ffprobe -v error -select_streams v -show_frames -of json "$InputFile" 2>$null | ConvertFrom-Json
+        Write-LogMessage -Level "RECOVERY" -Message "Attempting container repair" -Detailed
         
-        $result = @{
-            TotalFrames = 0
-            CorruptFrames = 0
-            KeyFrames = 0
-            LastGoodKeyframe = -1
-            HasAudio = $false
+        switch ($Analysis.Metadata.Container) {
+            "MP4" { return Repair-MP4Container -InputFile $InputFile -OutputFile $OutputFile -Analysis $Analysis }
+            "MKV" { return Repair-MKVContainer -InputFile $InputFile -OutputFile $OutputFile -Analysis $Analysis }
+            default { return Repair-GenericContainer -InputFile $InputFile -OutputFile $OutputFile -Analysis $Analysis }
         }
-        
-        if ($frameInfo.frames) {
-            $result.TotalFrames = $frameInfo.frames.Count
-            $result.KeyFrames = ($frameInfo.frames | Where-Object { $_.key_frame -eq 1 }).Count
-            $result.CorruptFrames = ($frameInfo.frames | Where-Object { $_.corrupt -eq 1 }).Count
-            
-            # Find last good keyframe
-            for ($i = $frameInfo.frames.Count - 1; $i -ge 0; $i--) {
-                if ($frameInfo.frames[$i].key_frame -eq 1 -and $frameInfo.frames[$i].corrupt -ne 1) {
-                    $result.LastGoodKeyframe = $i
-                    break
-                }
-            }
-        }
-        
-        # Check for audio
-        $audioInfo = & ffprobe -v error -select_streams a -show_streams "$InputFile" 2>$null
-        $result.HasAudio = $null -ne $audioInfo
-        
-        return $result
     }
     catch {
-        return $null
-    }
-}
-
-# Function to attempt stream repair
-function Repair-Stream {
-    param (
-        [string]$InputFile,
-        [string]$OutputFile,
-        [string]$StreamType = "video"
-    )
-    
-    $tempFile = Join-Path $TempDir "temp_stream.$StreamType"
-    
-    try {
-        if (Export-RawStream -InputFile $InputFile -OutputFile $tempFile -StreamType $StreamType) {
-            # Additional stream-specific repair steps
-            if ($StreamType -eq "video") {
-                # H264 bitstream filter
-                $process = Start-Process -FilePath "ffmpeg" -ArgumentList @(
-                    "-i", "`"$tempFile`"",
-                    "-bsf:v", "h264_mp4toannexb,dump_extra",
-                    "-c", "copy",
-                    "-y",
-                    "`"$OutputFile`""
-                ) -NoNewWindow -PassThru -Wait
-                
-                return $process.ExitCode -eq 0
-            }
-            else {
-                # Audio stream repair
-                $process = Start-Process -FilePath "ffmpeg" -ArgumentList @(
-                    "-i", "`"$tempFile`"",
-                    "-c:a", "aac",
-                    "-b:a", "384k",
-                    "-y",
-                    "`"$OutputFile`""
-                ) -NoNewWindow -PassThru -Wait
-                
-                return $process.ExitCode -eq 0
-            }
-        }
+        Write-LogMessage -Level "ERROR" -Message "Container repair failed: $($_.Exception.Message)" -Detailed
         return $false
     }
-    finally {
-        if (Test-Path $tempFile) {
-            Remove-Item $tempFile -Force
-        }
-    }
 }
 
-# Enhanced video repair function
-function Repair-Video {
+# MP4 container repair
+function Repair-MP4Container {
     param (
         [string]$InputFile,
         [string]$OutputFile,
-        [int]$AttemptNumber = 1
+        [hashtable]$Analysis
     )
     
-    $fileName = Split-Path $InputFile -Leaf
-    $tempOutput = Join-Path $TempDir "repair${AttemptNumber}_$fileName"
-    
     try {
-        Write-LogMessage -Level "RECOVERY" -Message "Starting recovery method $AttemptNumber for: $fileName" -Detailed
+        $tempFile = Join-Path $TempDir "rebuilt_container.mp4"
+        $stream = [System.IO.File]::Create($tempFile)
+        $reader = [System.IO.File]::OpenRead($InputFile)
         
-        # Get error type and frame analysis
-        $probeError = & ffprobe "$InputFile" 2>&1 | Out-String
-        $errorTypes = Get-VideoErrorType -FilePath $InputFile -ErrorText $probeError
-        $frameAnalysis = Get-FrameAnalysis -InputFile $InputFile
-        
-        Write-LogMessage -Level "RECOVERY" -Message "Detected error types: $($errorTypes -join ', ') for $fileName" -Detailed
-        if ($frameAnalysis) {
-            Write-LogMessage -Level "RECOVERY" -Message "Frame analysis: Total=$($frameAnalysis.TotalFrames), Corrupt=$($frameAnalysis.CorruptFrames), KeyFrames=$($frameAnalysis.KeyFrames)" -Detailed
+        # Write FTYP
+        $ftyp = $Analysis.Structure.Atoms | Where-Object { $_.Type -eq "ftyp" -and $_.IsValid } | Select-Object -First 1
+        if ($ftyp) {
+            $reader.Position = $ftyp.Offset
+            $buffer = New-Object byte[] $ftyp.Size
+            $reader.Read($buffer, 0, $ftyp.Size) | Out-Null
+            $stream.Write($buffer, 0, $ftyp.Size)
+        }
+        else {
+            # Write default FTYP
+            $defaultFtyp = [byte[]]@(
+                0,0,0,20,              # size
+                0x66,0x74,0x79,0x70,   # 'ftyp'
+                0x69,0x73,0x6F,0x6D,   # 'isom'
+                0,0,0,1,               # minor version
+                0x69,0x73,0x6F,0x6D    # compatible brand
+            )
+            $stream.Write($defaultFtyp, 0, $defaultFtyp.Length)
         }
         
-        # Different recovery methods based on error type and attempt number
-        switch ($AttemptNumber) {
-            1 {
-                # Basic container fix
-                $process = Start-Process -FilePath "ffmpeg" -ArgumentList @(
-                    "-err_detect", "ignore_err",
-                    "-i", "`"$InputFile`"",
-                    "-c", "copy",
-                    "-f", "mp4",
-                    "-y",
-                    "`"$tempOutput`""
-                ) -NoNewWindow -PassThru -Wait -RedirectStandardError "$env:TEMP\ffmpeg_error.txt"
-            }
-            2 {
-                # Index recovery for missing MOOV
-                $process = Start-Process -FilePath "ffmpeg" -ArgumentList @(
-                    "-f", "mp4",
-                    "-fflags", "+genpts+igndts",
-                    "-i", "`"$InputFile`"",
-                    "-c", "copy",
-                    "-movflags", "+faststart+use_metadata_tags",
-                    "-f", "mp4",
-                    "-y",
-                    "`"$tempOutput`""
-                ) -NoNewWindow -PassThru -Wait -RedirectStandardError "$env:TEMP\ffmpeg_error.txt"
-            }
-            3 {
-                # Stream extraction and rebuild
-                $videoStream = Join-Path $TempDir "temp_video.h264"
-                $audioStream = Join-Path $TempDir "temp_audio.aac"
-                
-                try {
-                    $videoSuccess = Repair-Stream -InputFile $InputFile -OutputFile $videoStream -StreamType "video"
-                    $audioSuccess = Repair-Stream -InputFile $InputFile -OutputFile $audioStream -StreamType "audio"
-                    
-                    if ($videoSuccess) {
-                        $args = @(
-                            "-i", "`"$videoStream`""
-                        )
-                        
-                        if ($audioSuccess) {
-                            $args += @("-i", "`"$audioStream`"")
-                        }
-                        
-                        $args += @(
-                            "-c:v", "copy",
-                            "-c:a", "copy",
-                            "-f", "mp4",
-                            "-y",
-                            "`"$tempOutput`""
-                        )
-                        
-                        $process = Start-Process -FilePath "ffmpeg" -ArgumentList $args -NoNewWindow -PassThru -Wait
-                    }
-                }
-                finally {
-                    @($videoStream, $audioStream) | Where-Object { Test-Path $_ } | ForEach-Object { Remove-Item $_ -Force }
-                }
-            }
-            4 {
-                # Frame-by-frame reconstruction
-                $process = Start-Process -FilePath "ffmpeg" -ArgumentList @(
-                    "-fflags", "+genpts+igndts+discardcorrupt",
-                    "-err_detect", "ignore_err",
-                    "-i", "`"$InputFile`"",
-                    "-c:v", "libx264",
-                    "-preset", "medium",
-                    "-crf", "18",
-                    "-refs", "1",
-                    "-force_key_frames", "expr:gte(t,n_forced*2)",
-                    "-c:a", "aac",
-                    "-b:a", "384k",
-                    "-ar", "48000",
-                    "-f", "mp4",
-                    "-y",
-                    "`"$tempOutput`""
-                ) -NoNewWindow -PassThru -Wait -RedirectStandardError "$env:TEMP\ffmpeg_error.txt"
-            }
-            5 {
-                # Keyframe preservation with error concealment
-                $process = Start-Process -FilePath "ffmpeg" -ArgumentList @(
-                    "-fflags", "+genpts+igndts",
-                    "-err_detect", "aggressive",
-                    "-i", "`"$InputFile`"",
-                    "-c:v", "libx264",
-                    "-preset", "slow",
-                    "-crf", "18",
-                    "-refs", "1",
-                    "-g", "30",
-                    "-keyint_min", "30",
-                    "-sc_threshold", "0",
-                    "-c:a", "aac",
-                    "-b:a", "384k",
-                    "-f", "mp4",
-                    "-y",
-                    "`"$tempOutput`""
-                ) -NoNewWindow -PassThru -Wait -RedirectStandardError "$env:TEMP\ffmpeg_error.txt"
-            }
-            6 {
-                # Segment-based recovery
-                $segments = Join-Path $TempDir "segments"
-                New-Item -ItemType Directory -Force -Path $segments | Out-Null
-                
-                try {
-                    # Split into segments
-                    $segmentProcess = Start-Process -FilePath "ffmpeg" -ArgumentList @(
-                        "-i", "`"$InputFile`"",
-                        "-f", "segment",
-                        "-segment_time", "10",
-                        "-reset_timestamps", "1",
-                        "-c", "copy",
-                        "`"$segments\segment_%03d.mp4`""
-                    ) -NoNewWindow -PassThru -Wait
-                    
-                    # Concatenate valid segments
-                    $segmentList = Join-Path $TempDir "segments.txt"
-                    Get-ChildItem "$segments\segment_*.mp4" | ForEach-Object {
-                        if ((Get-VideoErrorType -FilePath $_.FullName -ErrorText "").Count -eq 0) {
-                            "file '$($_.FullName)'" | Add-Content $segmentList
-                        }
-                    }
-                    
-                    if (Test-Path $segmentList) {
-                        $process = Start-Process -FilePath "ffmpeg" -ArgumentList @(
-                            "-f", "concat",
-                            "-safe", "0",
-                            "-i", "`"$segmentList`"",
-                            "-c", "copy",
-                            "-f", "mp4",
-                            "-y",
-                            "`"$tempOutput`""
-                        ) -NoNewWindow -PassThru -Wait -RedirectStandardError "$env:TEMP\ffmpeg_error.txt"
-                    }
-                }
-                finally {
-                    Remove-Item -Path $segments -Recurse -Force -ErrorAction SilentlyContinue
-                    Remove-Item -Path $segmentList -Force -ErrorAction SilentlyContinue
-                }
-            }
-            7 {
-                # Two-pass recovery with error concealment
-                $pass1Output = Join-Path $TempDir "pass1_$fileName"
-                
-                try {
-                    # First pass - analyze and attempt to fix stream errors
-                    $process1 = Start-Process -FilePath "ffmpeg" -ArgumentList @(
-                        "-fflags", "+genpts+igndts+discardcorrupt",
-                        "-err_detect", "aggressive",
-                        "-i", "`"$InputFile`"",
-                        "-c:v", "libx264",
-                        "-preset", "slow",
-                        "-crf", "18",
-                        "-refs", "1",
-                        "-bf", "0",
-                        "-flags", "+low_delay",
-                        "-strict", "experimental",
-                        "-y",
-                        "`"$pass1Output`""
-                    ) -NoNewWindow -PassThru -Wait
-                    
-                    if ($process1.ExitCode -eq 0) {
-                        # Second pass - optimize and finalize
-                        $process = Start-Process -FilePath "ffmpeg" -ArgumentList @(
-                            "-i", "`"$pass1Output`"",
-                            "-c:v", "libx264",
-                            "-preset", "slow",
-                            "-crf", "18",
-                            "-movflags", "+faststart",
-                            "-c:a", "aac",
-                            "-b:a", "384k",
-                            "-f", "mp4",
-                            "-y",
-                            "`"$tempOutput`""
-                        ) -NoNewWindow -PassThru -Wait -RedirectStandardError "$env:TEMP\ffmpeg_error.txt"
-                    }
-                }
-                finally {
-                    Remove-Item -Path $pass1Output -Force -ErrorAction SilentlyContinue
-                }
-            }
-            8 {
-                # Last resort: aggressive recovery with frame drop
-                $process = Start-Process -FilePath "ffmpeg" -ArgumentList @(
-                    "-fflags", "+genpts+igndts+discardcorrupt",
-                    "-err_detect", "aggressive",
-                    "-i", "`"$InputFile`"",
-                    "-c:v", "libx264",
-                    "-preset", "medium",
-                    "-crf", "23",
-                    "-refs", "1",
-                    "-vf", "select='not(mod(n,1))',setpts=N/FRAME_RATE/TB",
-                    "-af", "aselect='not(mod(n,1))',asetpts=N/SR/TB",
-                    "-max_muxing_queue_size", "1024",
-                    "-f", "mp4",
-                    "-y",
-                    "`"$tempOutput`""
-                ) -NoNewWindow -PassThru -Wait -RedirectStandardError "$env:TEMP\ffmpeg_error.txt"
-            }
-        }
-        
-        # Verify the output
-        if ($process.ExitCode -eq 0 -and (Test-Path $tempOutput) -and (Get-Item $tempOutput).Length -gt 0) {
-            $verifyCheck = Test-VideoFile -FilePath $tempOutput
-            if ($verifyCheck.IsValid) {
-                Move-Item -Path $tempOutput -Destination $OutputFile -Force
-                Write-LogMessage -Level "RECOVERY" -Message "Successfully recovered $fileName using method $AttemptNumber" -Detailed
-                
-                # Log recovery details
-                $originalSize = [math]::Round((Get-Item $InputFile).Length / 1MB, 2)
-                $recoveredSize = [math]::Round((Get-Item $OutputFile).Length / 1MB, 2)
-                Write-LogMessage -Level "RECOVERY" -Message "Recovery stats for $fileName - Original: ${originalSize}MB, Recovered: ${recoveredSize}MB" -Detailed
-                
-                return $true
+        # Build or repair MOOV
+        $moov = $Analysis.Structure.Atoms | Where-Object { $_.Type -eq "moov" -and $_.IsValid } | Select-Object -First 1
+        if ($moov) {
+            # Verify and repair MOOV if needed
+            $reader.Position = $moov.Offset
+            $moovData = New-Object byte[] $moov.Size
+            $reader.Read($moovData, 0, $moov.Size) | Out-Null
+            
+            if (Test-MOOVAtom -Data $moovData) {
+                $stream.Write($moovData, 0, $moovData.Length)
             }
             else {
-                Remove-Item -Path $tempOutput -Force
-                Write-LogMessage -Level "RECOVERY" -Message "Recovery attempt $AttemptNumber failed verification for $fileName" -Detailed
-                return $false
+                # Rebuild MOOV
+                $newMoov = New-EnhancedMOOVAtom -VideoData $moovData -Analysis $Analysis
+                $stream.Write($newMoov, 0, $newMoov.Length)
             }
         }
         else {
-            if (Test-Path $tempOutput) { Remove-Item -Path $tempOutput -Force }
+            # Generate new MOOV
+            $newMoov = New-EnhancedMOOVAtom -Analysis $Analysis
+            $stream.Write($newMoov, 0, $newMoov.Length)
+        }
+        
+        # Write MDAT
+        $mdat = $Analysis.Structure.Atoms | Where-Object { $_.Type -eq "mdat" -and $_.IsValid } | Select-Object -First 1
+        if ($mdat) {
+            $reader.Position = $mdat.Offset
+            $bufferSize = 1MB
+            $buffer = New-Object byte[] $bufferSize
+            $remaining = $mdat.Size
+            
+            while ($remaining -gt 0) {
+                $readSize = [Math]::Min($bufferSize, $remaining)
+                $bytesRead = $reader.Read($buffer, 0, $readSize)
+                if ($bytesRead -eq 0) { break }
+                
+                $stream.Write($buffer, 0, $bytesRead)
+                $remaining -= $bytesRead
+            }
+        }
+        else {
+            # Try to construct MDAT from valid NAL units
+            Write-VideoStream -Stream $stream -Analysis $Analysis -Reader $reader
+        }
+        
+        $stream.Close()
+        $reader.Close()
+        
+        # Verify and finalize with FFmpeg
+        $process = Start-Process -FilePath "ffmpeg" -ArgumentList @(
+            "-i", "`"$tempFile`"",
+            "-c", "copy",
+            "-movflags", "+faststart",
+            "-y",
+            "`"$OutputFile`""
+        ) -NoNewWindow -PassThru -Wait -RedirectStandardError "$env:TEMP\ffmpeg_error.txt"
+        
+        if ($process.ExitCode -eq 0) {
+            Write-LogMessage -Level "RECOVERY" -Message "MP4 container repair successful" -Detailed
+            Remove-Item $tempFile -Force
+            return $true
+        }
+        else {
             $errorContent = Get-Content "$env:TEMP\ffmpeg_error.txt" -Raw
-            Write-LogMessage -Level "RECOVERY" -Message "Recovery attempt $AttemptNumber failed for $fileName`: $errorContent" -Detailed
+            Write-LogMessage -Level "ERROR" -Message "MP4 container repair failed: $errorContent" -Detailed
+            Remove-Item $tempFile -Force
             return $false
         }
     }
     catch {
-        Write-LogMessage -Level "RECOVERY" -Message "Exception during recovery attempt $AttemptNumber for $fileName`: $($_.Exception.Message)" -Detailed
-        if (Test-Path $tempOutput) { Remove-Item -Path $tempOutput -Force }
+        Write-LogMessage -Level "ERROR" -Message "MP4 container repair failed: $($_.Exception.Message)" -Detailed
+        if (Test-Path $tempFile) { Remove-Item $tempFile -Force }
         return $false
     }
     finally {
-        if (Test-Path "$env:TEMP\ffmpeg_error.txt") { Remove-Item "$env:TEMP\ffmpeg_error.txt" -Force }
+        if ($stream) { $stream.Dispose() }
+        if ($reader) { $reader.Dispose() }
     }
 }
 
-# Function to validate video file
-function Test-VideoFile {
+# Stream extraction and reconstruction
+function Repair-StreamExtraction {
+    param (
+        [string]$InputFile,
+        [string]$OutputFile,
+        [hashtable]$Analysis
+    )
+    
+    try {
+        Write-LogMessage -Level "RECOVERY" -Message "Attempting stream extraction recovery" -Detailed
+        
+        $tempVideoStream = Join-Path $TempDir "extracted_video.h264"
+        $tempAudioStream = Join-Path $TempDir "extracted_audio.aac"
+        
+        # Extract video stream
+        $videoSuccess = $false
+        switch ($Analysis.Metadata.VideoCodec) {
+            "H264" {
+                $videoSuccess = Extract-H264Stream -InputFile $InputFile -OutputFile $tempVideoStream -Analysis $Analysis
+            }
+            "H265" {
+                $videoSuccess = Extract-H265Stream -InputFile $InputFile -OutputFile $tempVideoStream -Analysis $Analysis
+            }
+            default {
+                $videoSuccess = Extract-GenericVideoStream -InputFile $InputFile -OutputFile $tempVideoStream -Analysis $Analysis
+            }
+        }
+        
+        # Extract audio if present
+        $audioSuccess = $false
+        if ($Analysis.Metadata.AudioCodec) {
+            $audioSuccess = Extract-AudioStream -InputFile $InputFile -OutputFile $tempAudioStream -Analysis $Analysis
+        }
+        
+        if ($videoSuccess) {
+            # Rebuild container with extracted streams
+            $args = @(
+                "-f", $(if ($Analysis.Metadata.VideoCodec -eq "H264") { "h264" } else { "hevc" }),
+                "-i", "`"$tempVideoStream`""
+            )
+            
+            if ($audioSuccess) {
+                $args += @(
+                    "-f", "aac",
+                    "-i", "`"$tempAudioStream`""
+                )
+            }
+            
+            $args += @(
+                "-c:v", "copy",
+                "-c:a", "copy",
+                "-movflags", "+faststart",
+                "-y",
+                "`"$OutputFile`""
+            )
+            
+            $process = Start-Process -FilePath "ffmpeg" -ArgumentList $args -NoNewWindow -PassThru -Wait
+            
+            Remove-Item $tempVideoStream -Force -ErrorAction SilentlyContinue
+            if ($audioSuccess) { Remove-Item $tempAudioStream -Force -ErrorAction SilentlyContinue }
+            
+            return $process.ExitCode -eq 0
+        }
+        
+        return $false
+    }
+    catch {
+        Write-LogMessage -Level "ERROR" -Message "Stream extraction failed: $($_.Exception.Message)" -Detailed
+        return $false
+    }
+}
+
+# H264 stream extraction
+function Extract-H264Stream {
+    param (
+        [string]$InputFile,
+        [string]$OutputFile,
+        [hashtable]$Analysis
+    )
+    
+    try {
+        Write-LogMessage -Level "RECOVERY" -Message "Extracting H264 stream" -Detailed
+        
+        $reader = [System.IO.File]::OpenRead($InputFile)
+        $writer = [System.IO.File]::Create($OutputFile)
+        $buffer = New-Object byte[] $Global:Config.BufferSize
+        
+        # Track NAL unit state
+        $nalUnits = @{
+            SPS = $null
+            PPS = $null
+            IDR = $null
+            Found = @()
+        }
+        
+        # First pass: locate key NAL units
+        Write-LogMessage -Level "RECOVERY" -Message "Scanning for key NAL units" -Detailed
+        foreach ($nal in $Analysis.Structure.NALUnits) {
+            $reader.Position = $nal.Offset
+            $headerBuffer = New-Object byte[] 16
+            $reader.Read($headerBuffer, 0, [Math]::Min(16, $nal.Size)) | Out-Null
+            
+            $nalType = $headerBuffer[4] -band 0x1F
+            switch ($nalType) {
+                7 { # SPS
+                    if (-not $nalUnits.SPS) {
+                        $nalUnits.SPS = @{
+                            Offset = $nal.Offset
+                            Size = $nal.Size
+                        }
+                    }
+                }
+                8 { # PPS
+                    if (-not $nalUnits.PPS) {
+                        $nalUnits.PPS = @{
+                            Offset = $nal.Offset
+                            Size = $nal.Size
+                        }
+                    }
+                }
+                5 { # IDR
+                    if (-not $nalUnits.IDR) {
+                        $nalUnits.IDR = @{
+                            Offset = $nal.Offset
+                            Size = $nal.Size
+                        }
+                    }
+                }
+            }
+        }
+        
+        # Write stream header
+        if ($nalUnits.SPS -and $nalUnits.PPS) {
+            # Write SPS
+            $reader.Position = $nalUnits.SPS.Offset
+            $spsBuffer = New-Object byte[] $nalUnits.SPS.Size
+            $reader.Read($spsBuffer, 0, $nalUnits.SPS.Size) | Out-Null
+            $writer.Write($spsBuffer, 0, $spsBuffer.Length)
+            
+            # Write PPS
+            $reader.Position = $nalUnits.PPS.Offset
+            $ppsBuffer = New-Object byte[] $nalUnits.PPS.Size
+            $reader.Read($ppsBuffer, 0, $nalUnits.PPS.Size) | Out-Null
+            $writer.Write($ppsBuffer, 0, $ppsBuffer.Length)
+        }
+        else {
+            Write-LogMessage -Level "WARNING" -Message "Missing SPS/PPS, stream may not be playable" -Detailed
+        }
+        
+        # Second pass: write valid NAL units
+        Write-LogMessage -Level "RECOVERY" -Message "Writing valid NAL units" -Detailed
+        $validNALCount = 0
+        foreach ($nal in $Analysis.Structure.NALUnits) {
+            try {
+                $reader.Position = $nal.Offset
+                $remaining = $nal.Size
+                
+                while ($remaining -gt 0) {
+                    $readSize = [Math]::Min($Global:Config.BufferSize, $remaining)
+                    $bytesRead = $reader.Read($buffer, 0, $readSize)
+                    if ($bytesRead -eq 0) { break }
+                    
+                    $writer.Write($buffer, 0, $bytesRead)
+                    $remaining -= $bytesRead
+                }
+                
+                $validNALCount++
+            }
+            catch {
+                Write-LogMessage -Level "WARNING" -Message "Failed to write NAL unit at offset $($nal.Offset)" -Detailed
+                continue
+            }
+        }
+        
+        $writer.Close()
+        $reader.Close()
+        
+        Write-LogMessage -Level "RECOVERY" -Message "Extracted $validNALCount valid NAL units" -Detailed
+        
+        # Verify extracted stream
+        if (Test-H264Stream -FilePath $OutputFile) {
+            return $true
+        }
+        else {
+            Remove-Item $OutputFile -Force
+            return $false
+        }
+    }
+    catch {
+        Write-LogMessage -Level "ERROR" -Message "H264 stream extraction failed: $($_.Exception.Message)" -Detailed
+        if ($writer) { $writer.Close() }
+        if ($reader) { $reader.Close() }
+        if (Test-Path $OutputFile) { Remove-Item $OutputFile -Force }
+        return $false
+    }
+}
+
+# H264 stream verification
+function Test-H264Stream {
     param (
         [string]$FilePath
     )
     
     try {
-        # First check if we can read any stream info
-        $probeOutput = & ffprobe -v error -of json -show_streams -show_format -i "$FilePath" 2>&1
-        if ($LASTEXITCODE -ne 0) {
-            return @{
-                IsValid = $false
-                CodecName = $null
-                Error = "Failed to probe file"
-                RequiresRecovery = $true
-                Duration = 0
-                HasVideo = $false
-                HasAudio = $false
-            }
-        }
-
-        # Parse the JSON output
-        try {
-            $videoInfo = $probeOutput | ConvertFrom-Json
-        }
-        catch {
-            return @{
-                IsValid = $false
-                CodecName = $null
-                Error = "Invalid probe output"
-                RequiresRecovery = $true
-                Duration = 0
-                HasVideo = $false
-                HasAudio = $false
-            }
-        }
-
-        # Find video and audio streams
-        $videoStream = $videoInfo.streams | Where-Object { $_.codec_type -eq "video" } | Select-Object -First 1
-        $audioStream = $videoInfo.streams | Where-Object { $_.codec_type -eq "audio" } | Select-Object -First 1
-        
-        if (-not $videoStream) {
-            return @{
-                IsValid = $false
-                CodecName = $null
-                Error = "No video stream found"
-                RequiresRecovery = $true
-                Duration = 0
-                HasVideo = $false
-                HasAudio = ($null -ne $audioStream)
-            }
-        }
-
-        # Check duration and validate streams
-        $duration = if ($videoInfo.format.duration) { [float]$videoInfo.format.duration } else { 0 }
-        $requiresRecovery = $duration -eq 0 -or $duration -eq "N/A"
-
-        # Additional validation of video stream
-        $process = Start-Process -FilePath "ffmpeg" -ArgumentList @(
+        $process = Start-Process -FilePath "ffprobe" -ArgumentList @(
             "-v", "error",
-            "-i", "`"$FilePath`"",
-            "-t", "1",
-            "-f", "null",
-            "-"
-        ) -NoNewWindow -PassThru -Wait -RedirectStandardError "$env:TEMP\ffmpeg_error.txt"
-
-        $hasErrors = $false
-        if (Test-Path "$env:TEMP\ffmpeg_error.txt") {
-            $errors = Get-Content "$env:TEMP\ffmpeg_error.txt"
-            $hasErrors = $errors.Count -gt 0
-            Remove-Item "$env:TEMP\ffmpeg_error.txt" -Force
+            "-select_streams", "v:0",
+            "-show_entries", "stream=codec_name",
+            "-of", "default=noprint_wrappers=1:nokey=1",
+            "`"$FilePath`""
+        ) -NoNewWindow -PassThru -Wait -RedirectStandardOutput "$env:TEMP\ffprobe_out.txt"
+        
+        if ($process.ExitCode -eq 0) {
+            $codec = Get-Content "$env:TEMP\ffprobe_out.txt"
+            return $codec -eq "h264"
         }
-
-        return @{
-            IsValid = -not $requiresRecovery -and -not $hasErrors
-            CodecName = $videoStream.codec_name
-            Error = if ($requiresRecovery -or $hasErrors) { "Stream validation failed" } else { $null }
-            RequiresRecovery = $requiresRecovery -or $hasErrors
-            Duration = $duration
-            HasVideo = $true
-            HasAudio = ($null -ne $audioStream)
-            Width = $videoStream.width
-            Height = $videoStream.height
-            FrameRate = $videoStream.r_frame_rate
-        }
+        return $false
     }
     catch {
-        return @{
-            IsValid = $false
-            CodecName = $null
-            Error = $_.Exception.Message
-            RequiresRecovery = $true
-            Duration = 0
-            HasVideo = $false
-            HasAudio = $false
+        return $false
+    }
+    finally {
+        if (Test-Path "$env:TEMP\ffprobe_out.txt") {
+            Remove-Item "$env:TEMP\ffprobe_out.txt" -Force
         }
     }
 }
 
-# Function to process video files
+# NAL unit reconstruction
+function Repair-NALReconstruction {
+    param (
+        [string]$InputFile,
+        [string]$OutputFile,
+        [hashtable]$Analysis
+    )
+    
+    try {
+        Write-LogMessage -Level "RECOVERY" -Message "Attempting NAL reconstruction" -Detailed
+        
+        $tempStream = Join-Path $TempDir "reconstructed_stream.h264"
+        $writer = [System.IO.File]::Create($tempStream)
+        $reader = [System.IO.File]::OpenRead($InputFile)
+        
+        # Track frame sequences
+        $frameSequence = @{
+            LastKeyFrame = $null
+            CurrentGOP = @()
+            ValidGOPs = 0
+        }
+        
+        # Process NAL units
+        $currentNAL = 0
+        $totalNALs = $Analysis.Structure.NALUnits.Count
+        
+        foreach ($nal in $Analysis.Structure.NALUnits) {
+            $currentNAL++
+            if ($currentNAL % 100 -eq 0) {
+                Write-LogMessage -Level "RECOVERY" -Message "Processing NAL unit $currentNAL of $totalNALs" -Detailed
+            }
+            
+            try {
+                $reader.Position = $nal.Offset
+                $headerBuffer = New-Object byte[] 16
+                $reader.Read($headerBuffer, 0, [Math]::Min(16, $nal.Size)) | Out-Null
+                
+                $nalType = $headerBuffer[4] -band 0x1F
+                
+                # Handle different NAL types
+                switch ($nalType) {
+                    5 { # IDR Frame
+                        if ($frameSequence.CurrentGOP.Count -gt 0) {
+                            # Write previous GOP if valid
+                            if ($frameSequence.LastKeyFrame) {
+                                Write-GOP -Writer $writer -GOP $frameSequence.CurrentGOP -Analysis $Analysis
+                                $frameSequence.ValidGOPs++
+                            }
+                            $frameSequence.CurrentGOP.Clear()
+                        }
+                        $frameSequence.LastKeyFrame = $nal
+                        $frameSequence.CurrentGOP += $nal
+                    }
+                    1 { # Non-IDR Frame
+                        if ($frameSequence.LastKeyFrame) {
+                            $frameSequence.CurrentGOP += $nal
+                        }
+                    }
+                    7 { # SPS
+                        Write-NALUnit -Writer $writer -NAL $nal -Reader $reader
+                    }
+                    8 { # PPS
+                        Write-NALUnit -Writer $writer -NAL $nal -Reader $reader
+                    }
+                    default {
+                        if ($frameSequence.LastKeyFrame) {
+                            Write-NALUnit -Writer $writer -NAL $nal -Reader $reader
+                        }
+                    }
+                }
+            }
+            catch {
+                Write-LogMessage -Level "WARNING" -Message "Failed to process NAL unit $currentNAL" -Detailed
+                continue
+            }
+        }
+        
+        # Write final GOP if exists
+        if ($frameSequence.CurrentGOP.Count -gt 0 -and $frameSequence.LastKeyFrame) {
+            Write-GOP -Writer $writer -GOP $frameSequence.CurrentGOP -Analysis $Analysis
+            $frameSequence.ValidGOPs++
+        }
+        
+        $writer.Close()
+        $reader.Close()
+        
+        Write-LogMessage -Level "RECOVERY" -Message "Reconstructed $($frameSequence.ValidGOPs) valid GOPs" -Detailed
+        
+        # Convert reconstructed stream to final output
+        if ($frameSequence.ValidGOPs -gt 0) {
+            $process = Start-Process -FilePath "ffmpeg" -ArgumentList @(
+                "-f", "h264",
+                "-i", "`"$tempStream`"",
+                "-c:v", "copy",
+                "-movflags", "+faststart",
+                "-y",
+                "`"$OutputFile`""
+            ) -NoNewWindow -PassThru -Wait
+            
+            Remove-Item $tempStream -Force
+            return $process.ExitCode -eq 0
+        }
+        
+        Remove-Item $tempStream -Force
+        return $false
+    }
+    catch {
+        Write-LogMessage -Level "ERROR" -Message "NAL reconstruction failed: $($_.Exception.Message)" -Detailed
+        if ($writer) { $writer.Close() }
+        if ($reader) { $reader.Close() }
+        if (Test-Path $tempStream) { Remove-Item $tempStream -Force }
+        return $false
+    }
+}
+
+# Deep recovery implementation
+function Repair-DeepRecovery {
+    param (
+        [string]$InputFile,
+        [string]$OutputFile,
+        [hashtable]$Analysis
+    )
+    
+    try {
+        Write-LogMessage -Level "RECOVERY" -Message "Starting deep recovery process" -Detailed
+        
+        # Create temporary directory for fragments
+        $fragmentDir = Join-Path $TempDir "fragments"
+        New-Item -ItemType Directory -Force -Path $fragmentDir | Out-Null
+        
+        # Extract valid segments
+        $validSegments = Get-ValidSegments -Analysis $Analysis
+        $segmentFiles = @()
+        
+        foreach ($segment in $validSegments) {
+            $segmentFile = Join-Path $fragmentDir "segment_$($segment.Start).mp4"
+            if (Extract-VideoSegment -InputFile $InputFile -OutputFile $segmentFile -Start $segment.Start -Size $segment.Size) {
+                $segmentFiles += $segmentFile
+            }
+        }
+        
+        if ($segmentFiles.Count -eq 0) {
+            Write-LogMessage -Level "ERROR" -Message "No valid segments could be extracted" -Detailed
+            return $false
+        }
+        
+        # Create segment list file
+        $segmentList = Join-Path $TempDir "segments.txt"
+        $segmentFiles | ForEach-Object {
+            "file '$_'" | Add-Content $segmentList
+        }
+        
+        # Combine segments
+        $process = Start-Process -FilePath "ffmpeg" -ArgumentList @(
+            "-f", "concat",
+            "-safe", "0",
+            "-i", "`"$segmentList`"",
+            "-c", "copy",
+            "-movflags", "+faststart",
+            "-y",
+            "`"$OutputFile`""
+        ) -NoNewWindow -PassThru -Wait
+        
+        # Cleanup
+        Remove-Item $fragmentDir -Recurse -Force
+        Remove-Item $segmentList -Force
+        
+        return $process.ExitCode -eq 0
+    }
+    catch {
+        Write-LogMessage -Level "ERROR" -Message "Deep recovery failed: $($_.Exception.Message)" -Detailed
+        return $false
+    }
+}
+
+# Aggressive recovery implementation
+function Repair-AggressiveRecovery {
+    param (
+        [string]$InputFile,
+        [string]$OutputFile,
+        [hashtable]$Analysis
+    )
+    
+    try {
+        Write-LogMessage -Level "RECOVERY" -Message "Starting aggressive recovery" -Detailed
+        
+        # Attempt multiple approaches in sequence
+        $approaches = @(
+            @{
+                Name = "Lenient"
+                Args = @(
+                    "-fflags", "+genpts+igndts+discardcorrupt",
+                    "-err_detect", "ignore_err",
+                    "-i", "`"$InputFile`"",
+                    "-c:v", "libx264",
+                    "-preset", "medium",
+                    "-crf", "23",
+                    "-c:a", "aac",
+                    "-b:a", "128k",
+                    "-y",
+                    "`"$OutputFile`""
+                )
+            }
+            @{
+                Name = "Fragment"
+                Args = @(
+                    "-fflags", "+genpts+igndts",
+                    "-i", "`"$InputFile`"",
+                    "-f", "segment",
+                    "-segment_time", "5",
+                    "-reset_timestamps", "1",
+                    "-c", "copy",
+                    "-y",
+                    "`"$OutputFile`""
+                )
+            }
+            @{
+                Name = "Rebuild"
+                Args = @(
+                    "-fflags", "+genpts",
+                    "-i", "`"$InputFile`"",
+                    "-c:v", "libx264",
+                    "-preset", "veryslow",
+                    "-crf", "18",
+                    "-refs", "1",
+                    "-deblock", "0:0",
+                    "-c:a", "aac",
+                    "-b:a", "192k",
+                    "-y",
+                    "`"$OutputFile`""
+                )
+            }
+        )
+        
+        foreach ($approach in $approaches) {
+            Write-LogMessage -Level "RECOVERY" -Message "Trying $($approach.Name) approach" -Detailed
+            
+            $process = Start-Process -FilePath "ffmpeg" -ArgumentList $approach.Args -NoNewWindow -PassThru -Wait
+            
+            if ($process.ExitCode -eq 0 -and (Test-Path $OutputFile)) {
+                # Verify output
+                $verifyProcess = Start-Process -FilePath "ffprobe" -ArgumentList @(
+                    "-v", "error",
+                    "-show_entries", "format=duration",
+                    "-of", "default=noprint_wrappers=1:nokey=1",
+                    "`"$OutputFile`""
+                ) -NoNewWindow -PassThru -Wait -RedirectStandardOutput "$env:TEMP\ffprobe_out.txt"
+                
+                if ($verifyProcess.ExitCode -eq 0) {
+                    $duration = Get-Content "$env:TEMP\ffprobe_out.txt"
+                    if ([double]$duration -gt 0) {
+                        Write-LogMessage -Level "RECOVERY" -Message "$($approach.Name) approach successful" -Detailed
+                        return $true
+                    }
+                }
+            }
+            
+            if (Test-Path $OutputFile) {
+                Remove-Item $OutputFile -Force
+            }
+        }
+        
+        Write-LogMessage -Level "ERROR" -Message "All aggressive recovery approaches failed" -Detailed
+        return $false
+    }
+    catch {
+        Write-LogMessage -Level "ERROR" -Message "Aggressive recovery failed: $($_.Exception.Message)" -Detailed
+        return $false
+    }
+}
+
+# Main processing function
 function Process-Video {
     param (
         [string]$InputFile,
         [string]$OutputFile
     )
     
-    $fileName = Split-Path $InputFile -Leaf
-    $tempOutput = $null
-    
     try {
-        # Create output directory if it doesn't exist
-        $outputDir = Split-Path -Parent $OutputFile
-        if (-not (Test-Path $outputDir)) {
-            New-Item -ItemType Directory -Force -Path $outputDir | Out-Null
-        }
+        $fileName = Split-Path $InputFile -Leaf
+        Write-LogMessage -Level "INFO" -Message "Processing $fileName"
         
-        # Skip if output already exists
+        # Skip if output exists
         if (Test-Path $OutputFile) {
-            Write-LogMessage -Level "INFO" -Message "Skipping already processed video: $fileName"
+            Write-LogMessage -Level "INFO" -Message "Output file already exists, skipping"
             return 1
         }
         
-        # Check if input file exists and is not empty
-        if (-not (Test-Path $InputFile) -or (Get-Item $InputFile).Length -eq 0) {
-            Write-LogMessage -Level "ERROR" -Message "Input file is missing or empty: $fileName"
+        # Initial analysis
+        $analysis = Get-BinaryAnalysis -FilePath $InputFile -DeepScan:$DeepAnalysis
+        if (-not $analysis) {
+            Write-LogMessage -Level "ERROR" -Message "Failed to analyze file"
             return 2
         }
         
-        # Validate video file
-        $videoCheck = Test-VideoFile -FilePath $InputFile
-        Write-LogMessage -Level "INFO" -Message "Video check for $fileName - Valid: $($videoCheck.IsValid), Codec: $($videoCheck.CodecName), Has Audio: $($videoCheck.HasAudio)" -Detailed
-        
-        if (-not $videoCheck.IsValid) {
-            if ($AttemptRecovery -and $videoCheck.RequiresRecovery) {
-                Write-LogMessage -Level "RECOVERY" -Message "Starting recovery process for: $fileName"
-                
-                # Try each recovery method
-                for ($i = 1; $i -le $RecoveryAttempts; $i++) {
-                    Write-LogMessage -Level "RECOVERY" -Message "Attempting recovery method $i of $RecoveryAttempts for $fileName"
-                    if (Repair-Video -InputFile $InputFile -OutputFile $OutputFile -AttemptNumber $i) {
-                        Write-LogMessage -Level "RECOVERY" -Message "Successfully recovered $fileName using method $i"
-                        return 0
-                    }
-                    Write-LogMessage -Level "RECOVERY" -Message "Recovery method $i failed for $fileName"
-                }
-                
-                Write-LogMessage -Level "ERROR" -Message "All recovery attempts failed for: $fileName"
-                return 2
-            }
-            else {
-                Write-LogMessage -Level "ERROR" -Message "Invalid or corrupt video file ($($videoCheck.Error)): $fileName"
-                return 2
-            }
+        # Check if file needs recovery
+        if ($analysis.Recovery.RequiredLevel -eq "None") {
+            # Simple copy or remux
+            return Copy-CleanVideo -InputFile $InputFile -OutputFile $OutputFile
         }
         
-        # If input is already H.264 and valid, optimize the container
-        if ($videoCheck.CodecName -eq "h264" -and $videoCheck.IsValid) {
-            $tempOutput = Join-Path $TempDir "temp_$fileName"
+        if (-not $AttemptRecovery) {
+            Write-LogMessage -Level "ERROR" -Message "File requires recovery but recovery is disabled"
+            return 2
+        }
+        
+        # Get recovery methods
+        $methods = Get-RecoveryMethod -Analysis $analysis
+        
+        # Try each recovery method
+        foreach ($method in $methods) {
+            Write-LogMessage -Level "RECOVERY" -Message "Attempting $($method.Name) recovery method"
             
-            $process = Start-Process -FilePath "ffmpeg" -ArgumentList @(
-                "-i", "`"$InputFile`"",
-                "-c", "copy",
-                "-movflags", "+faststart",
-                "-y",
-                "`"$tempOutput`""
-            ) -NoNewWindow -PassThru -Wait -RedirectStandardError "$env:TEMP\ffmpeg_error.txt"
-
-            if ($process.ExitCode -eq 0) {
-                Move-Item -Path $tempOutput -Destination $OutputFile -Force
-                Write-LogMessage -Level "INFO" -Message "Optimized container for $fileName"
-                return 0
+            $scriptBlock = $ExecutionContext.InvokeCommand.GetCommand($method.Function, 'Function')
+            if ($scriptBlock) {
+                if (& $scriptBlock -InputFile $InputFile -OutputFile $OutputFile -Analysis $analysis) {
+                    Write-LogMessage -Level "SUCCESS" -Message "Recovery successful using $($method.Name)"
+                    return 0
+                }
             }
         }
         
-        # Process with high-quality settings
-        $tempOutput = Join-Path $TempDir "temp_$fileName"
-        $process = Start-Process -FilePath "ffmpeg" -ArgumentList @(
-            "-i", "`"$InputFile`"",
-            "-c:v", "libx264",
-            "-preset", "veryslow",
-            "-crf", "18",
-            "-profile:v", "high",
-            "-level", "4.2",
-            "-pix_fmt", "yuv420p",
-            "-c:a", "aac",
-            "-b:a", "384k",
-            "-ar", "48000",
-            "-movflags", "+faststart",
-            "-y",
-            "`"$tempOutput`""
-        ) -NoNewWindow -PassThru -Wait -RedirectStandardError "$env:TEMP\ffmpeg_error.txt"
-        
-        if ($process.ExitCode -eq 0 -and (Test-Path $tempOutput) -and (Get-Item $tempOutput).Length -gt 0) {
-            Move-Item -Path $tempOutput -Destination $OutputFile -Force
-            $inputSize = [math]::Round((Get-Item $InputFile).Length / 1MB, 2)
-            $outputSize = [math]::Round((Get-Item $OutputFile).Length / 1MB, 2)
-            Write-LogMessage -Level "INFO" -Message "Processed: $fileName"
-            Write-LogMessage -Level "INFO" -Message "Size change for $fileName`: ${inputSize}MB -> ${outputSize}MB"
-            return 0
-        }
-        else {
-            $errorContent = Get-Content "$env:TEMP\ffmpeg_error.txt" -Raw
-            Write-LogMessage -Level "ERROR" -Message "Failed to process $fileName`: $errorContent"
-            if (Test-Path $tempOutput) { Remove-Item -Path $tempOutput -Force }
-            return 2
-        }
-    }
-    catch {
-        Write-LogMessage -Level "ERROR" -Message "Exception processing $fileName`: $($_.Exception.Message)"
-        if ($tempOutput -and (Test-Path $tempOutput)) { Remove-Item -Path $tempOutput -Force }
+        Write-LogMessage -Level "ERROR" -Message "All recovery methods failed"
         return 2
     }
-    finally {
-        if (Test-Path "$env:TEMP\ffmpeg_error.txt") { Remove-Item "$env:TEMP\ffmpeg_error.txt" -Force }
+    catch {
+        Write-LogMessage -Level "ERROR" -Message "Error processing $fileName`: $($_.Exception.Message)"
+        return 2
     }
 }
 
-# Main processing function
+# Main entry point
 function Start-VideoProcessing {
-    if (-not (Test-FFmpeg)) {
+    if (-not (Initialize-Environment)) {
         return
     }
     
     Write-LogMessage -Level "INFO" -Message "Starting video processing"
     Write-LogMessage -Level "INFO" -Message "Input path: $InputPath"
     Write-LogMessage -Level "INFO" -Message "Output path: $OutputPath"
-    Write-LogMessage -Level "INFO" -Message "Recovery attempts: $RecoveryAttempts"
     
     # Initialize counters
     $script:totalFiles = 0
@@ -760,23 +1527,23 @@ function Start-VideoProcessing {
             $relativePath = $file.FullName.Substring($InputPath.Length)
             $outputFile = Join-Path $OutputPath $relativePath
             
+            # Create output directory if needed
+            $outputDir = Split-Path $outputFile -Parent
+            if (-not (Test-Path $outputDir)) {
+                New-Item -ItemType Directory -Force -Path $outputDir | Out-Null
+            }
+            
             $result = Process-Video -InputFile $file.FullName -OutputFile $outputFile
             
             switch ($result) {
-                0 { 
-                    $script:processedFiles++
-                    # Check if this was a recovered file
-                    if (Get-Content $RecoveryLogPath | Select-String -SimpleMatch $file.Name) {
-                        $script:recoveredFiles++
-                    }
-                }
+                0 { $script:processedFiles++ }
                 1 { $script:skippedFiles++ }
                 2 { $script:errorFiles++ }
             }
             
-            # Log progress every 5 files
+            # Log progress
             if (($processedFiles + $skippedFiles + $errorFiles) % 5 -eq 0) {
-                Write-LogMessage -Level "INFO" -Message "Progress: $processedFiles processed ($recoveredFiles recovered), $skippedFiles skipped, $errorFiles failed (Total: $totalFiles)"
+                Write-LogMessage -Level "INFO" -Message "Progress: $processedFiles processed, $skippedFiles skipped, $errorFiles failed (Total: $totalFiles)"
             }
         }
     }
@@ -784,9 +1551,9 @@ function Start-VideoProcessing {
         Write-LogMessage -Level "ERROR" -Message "Fatal error during processing: $($_.Exception.Message)"
     }
     finally {
-        # Clean up temp directory
+        # Cleanup
         if (Test-Path $TempDir) {
-            Remove-Item -Path $TempDir -Recurse -Force -ErrorAction SilentlyContinue
+            Remove-Item $TempDir -Recurse -Force -ErrorAction SilentlyContinue
         }
         
         # Log final summary
@@ -794,8 +1561,7 @@ function Start-VideoProcessing {
 Processing complete.
 Total files: $totalFiles
 Processed successfully: $processedFiles
-Recovered from corruption: $recoveredFiles
-Skipped (already processed): $skippedFiles
+Skipped: $skippedFiles
 Failed: $errorFiles
 "@
     }
