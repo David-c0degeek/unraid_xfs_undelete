@@ -1,8 +1,8 @@
 # Advanced Video Processing and Recovery Script
 
 param (
-    [string]$InputPath = ".\input",
-    [string]$OutputPath = ".\output",
+    [string]$InputPath = "./input",
+    [string]$OutputPath = "./output",
     [string]$TempDir = "$env:TEMP\VideoRecovery",
     [switch]$AttemptRecovery = $true,
     [int]$MaxRetries = 3,
@@ -406,20 +406,22 @@ function Get-MP4Structure {
         $reader.BaseStream.Position = 0
         $fileSize = $reader.BaseStream.Length
         
-        while ($reader.BaseStream.Position -lt $fileSize) {
+        while ($reader.BaseStream.Position -lt ($fileSize - 8)) {
             $atomStart = $reader.BaseStream.Position
             
-            # Read atom size and type
-            if ($reader.BaseStream.Length - $reader.BaseStream.Position < 8) {
+            # Check remaining bytes
+            $remainingBytes = $fileSize - $reader.BaseStream.Position
+            if ($remainingBytes -lt 8) {
                 break
             }
             
+            # Read atom size and type
             $atomSize = [System.Net.IPAddress]::NetworkToHostOrder($reader.ReadInt32())
             $atomType = [System.Text.Encoding]::ASCII.GetString($reader.ReadBytes(4))
             
             # Validate atom
             $isValid = $true
-            if ($atomSize -lt 8 -or $atomSize -gt ($fileSize - $atomStart)) {
+            if (($atomSize -lt 8) -or ($atomSize -gt ($fileSize - $atomStart))) {
                 $isValid = $false
                 $atomSize = 8 # Minimum atom size
             }
@@ -448,6 +450,30 @@ function Get-MP4Structure {
         Write-LogMessage -Level "ERROR" -Message "Error analyzing MP4 structure: $($_.Exception.Message)" -Detailed
         return $structure
     }
+}
+
+# Helper function for safe comparison
+function Test-RemainingBytes {
+    param (
+        [System.IO.BinaryReader]$Reader,
+        [int64]$RequiredBytes
+    )
+    
+    $remaining = $Reader.BaseStream.Length - $Reader.BaseStream.Position
+    return ($remaining -ge $RequiredBytes)
+}
+
+# Safe read function
+function Read-SafeBytes {
+    param (
+        [System.IO.BinaryReader]$Reader,
+        [int]$Count
+    )
+    
+    if (Test-RemainingBytes -Reader $Reader -RequiredBytes $Count) {
+        return $Reader.ReadBytes($Count)
+    }
+    return $null
 }
 
 # NAL unit analysis
