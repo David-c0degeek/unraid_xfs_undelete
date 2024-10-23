@@ -1792,6 +1792,149 @@ function Process-Video {
     }
 }
 
+# Function to write video stream data
+function Write-VideoStream {
+    param (
+        [System.IO.Stream]$Stream,
+        [hashtable]$Analysis,
+        [System.IO.BinaryReader]$Reader
+    )
+    
+    try {
+        # Write MDAT header
+        $mdatHeader = [byte[]]@(0,0,0,0, 0x6D,0x64,0x61,0x74)  # Size will be updated later
+        $mdatStart = $Stream.Position
+        $Stream.Write($mdatHeader, 0, 8)
+        
+        # Write NAL units
+        $dataWritten = 0
+        foreach ($nal in $Analysis.Structure.NALUnits) {
+            if ($nal.Size -gt 0) {
+                $Reader.BaseStream.Position = $nal.Offset
+                $buffer = New-Object byte[] $nal.Size
+                $bytesRead = $Reader.Read($buffer, 0, $nal.Size)
+                
+                if ($bytesRead -gt 0) {
+                    $Stream.Write($buffer, 0, $bytesRead)
+                    $dataWritten += $bytesRead
+                }
+            }
+        }
+        
+        # Update MDAT size
+        $mdatSize = $dataWritten + 8  # Include header size
+        $sizeBytes = [BitConverter]::GetBytes([int32]$mdatSize)
+        [Array]::Reverse($sizeBytes)
+        
+        $Stream.Position = $mdatStart
+        $Stream.Write($sizeBytes, 0, 4)
+        $Stream.Position = $Stream.Length
+        
+        return $true
+    }
+    catch {
+        Write-LogMessage -Level "ERROR" -Message "Error writing video stream: $($_.Exception.Message)"
+        return $false
+    }
+}
+
+# Function to extract audio stream
+function Extract-AudioStream {
+    param (
+        [string]$InputFile,
+        [string]$OutputFile,
+        [hashtable]$Analysis
+    )
+    
+    try {
+        # Try to extract audio stream using FFmpeg
+        $process = Start-Process -FilePath "ffmpeg" -ArgumentList @(
+            "-i", "`"$InputFile`"",
+            "-vn",             # Disable video
+            "-acodec", "copy", # Copy audio codec
+            "-y",             # Overwrite output
+            "`"$OutputFile`""
+        ) -NoNewWindow -PassThru -Wait -RedirectStandardError "$env:TEMP\ffmpeg_error.txt"
+        
+        if ($process.ExitCode -eq 0 -and (Test-Path $OutputFile)) {
+            # Verify the extracted audio
+            $verifyProcess = Start-Process -FilePath "ffprobe" -ArgumentList @(
+                "-v", "error",
+                "-show_entries", "stream=codec_type",
+                "-of", "default=noprint_wrappers=1:nokey=1",
+                "`"$OutputFile`""
+            ) -NoNewWindow -PassThru -Wait -RedirectStandardOutput "$env:TEMP\ffprobe_out.txt"
+            
+            if ($verifyProcess.ExitCode -eq 0) {
+                $streamType = Get-Content "$env:TEMP\ffprobe_out.txt"
+                if ($streamType -contains "audio") {
+                    return $true
+                }
+            }
+        }
+        
+        return $false
+    }
+    catch {
+        Write-LogMessage -Level "ERROR" -Message "Error extracting audio stream: $($_.Exception.Message)"
+        return $false
+    }
+    finally {
+        if (Test-Path "$env:TEMP\ffmpeg_error.txt") { Remove-Item "$env:TEMP\ffmpeg_error.txt" -Force }
+        if (Test-Path "$env:TEMP\ffprobe_out.txt") { Remove-Item "$env:TEMP\ffprobe_out.txt" -Force }
+    }
+}
+
+# Function to safely read chunks of data
+function Read-FileChunk {
+    param (
+        [System.IO.BinaryReader]$Reader,
+        [int]$Size
+    )
+    
+    try {
+        $remaining = $Reader.BaseStream.Length - $Reader.BaseStream.Position
+        $readSize = [Math]::Min($Size, $remaining)
+        
+        if ($readSize -le 0) { return $null }
+        
+        return $Reader.ReadBytes($readSize)
+    }
+    catch {
+        Write-LogMessage -Level "ERROR" -Message "Error reading file chunk: $($_.Exception.Message)"
+        return $null
+    }
+}
+
+# Helper function to validate audio stream
+function Test-AudioStream {
+    param ([string]$FilePath)
+    
+    try {
+        $process = Start-Process -FilePath "ffprobe" -ArgumentList @(
+            "-v", "error",
+            "-select_streams", "a:0",
+            "-show_entries", "stream=codec_name",
+            "-of", "default=noprint_wrappers=1:nokey=1",
+            "`"$FilePath`""
+        ) -NoNewWindow -PassThru -Wait -RedirectStandardOutput "$env:TEMP\ffprobe_out.txt"
+        
+        if ($process.ExitCode -eq 0) {
+            $codec = Get-Content "$env:TEMP\ffprobe_out.txt"
+            return -not [string]::IsNullOrWhiteSpace($codec)
+        }
+        return $false
+    }
+    catch {
+        return $false
+    }
+    finally {
+        if (Test-Path "$env:TEMP\ffprobe_out.txt") {
+            Remove-Item "$env:TEMP\ffprobe_out.txt" -Force
+        }
+    }
+}
+
 # Main entry point
 function Start-VideoProcessing {
     if (-not (Initialize-Environment)) {
