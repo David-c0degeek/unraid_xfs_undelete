@@ -376,6 +376,11 @@ function Start-VideoProcessing {
     catch {
         Write-LogMessage -Level "ERROR" -Message "Fatal error during processing: $($_.Exception.Message)"
     }
-    finally {
+finally {
         # Log final summary
-        Write-LogMessage -Level "SUMMARY" -Message "Processing complete. Total files: $totalFiles, Processed: $processedFiles ($recoveredFiles recovered), Skippe
+        Write-LogMessage -Level "SUMMARY" -Message "Processing complete. Total files: $totalFiles, Processed: $processedFiles ($recoveredFiles recovered), Skipped: $skippedFiles, Errors: $errorFiles"
+    }
+}
+
+# Start the processing
+Start-VideoProcessing
