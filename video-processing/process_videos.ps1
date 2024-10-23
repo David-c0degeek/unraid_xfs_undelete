@@ -852,7 +852,51 @@ function Repair-Container {
     }
 }
 
-# MP4 container repair
+# Function to verify media file
+function Test-MediaFile {
+    param (
+        [string]$FilePath
+    )
+    
+    try {
+        # Check if file exists and has size
+        if (-not (Test-Path $FilePath) -or (Get-Item $FilePath).Length -eq 0) {
+            return $false
+        }
+
+        # Verify with ffprobe
+        $process = Start-Process -FilePath "ffprobe" -ArgumentList @(
+            "-v", "error",
+            "-show_entries", "format=duration,bit_rate:stream=codec_type",
+            "-of", "json",
+            "`"$FilePath`""
+        ) -NoNewWindow -PassThru -Wait -RedirectStandardOutput "$env:TEMP\ffprobe_out.txt" -RedirectStandardError "$env:TEMP\ffprobe_error.txt"
+
+        if ($process.ExitCode -ne 0) {
+            return $false
+        }
+
+        # Check for at least one valid stream
+        $probeOutput = Get-Content "$env:TEMP\ffprobe_out.txt" | ConvertFrom-Json
+        if (-not $probeOutput.streams -or $probeOutput.streams.Count -eq 0) {
+            return $false
+        }
+
+        # Verify at least one video or audio stream
+        $hasValidStream = $probeOutput.streams | Where-Object { $_.codec_type -in @('video', 'audio') }
+        return $null -ne $hasValidStream
+    }
+    catch {
+        Write-LogMessage -Level "ERROR" -Message "Error verifying media file: $($_.Exception.Message)"
+        return $false
+    }
+    finally {
+        if (Test-Path "$env:TEMP\ffprobe_out.txt") { Remove-Item "$env:TEMP\ffprobe_out.txt" -Force }
+        if (Test-Path "$env:TEMP\ffprobe_error.txt") { Remove-Item "$env:TEMP\ffprobe_error.txt" -Force }
+    }
+}
+
+# Modified repair container function with better error handling
 function Repair-MP4Container {
     param (
         [string]$InputFile,
@@ -865,6 +909,8 @@ function Repair-MP4Container {
         $stream = [System.IO.File]::Create($tempFile)
         $reader = [System.IO.File]::OpenRead($InputFile)
         
+        Write-LogMessage -Level "INFO" -Message "Starting container repair for $($InputFile)"
+        
         # Write FTYP
         $ftyp = $Analysis.Structure.Atoms | Where-Object { $_.Type -eq "ftyp" -and $_.IsValid } | Select-Object -First 1
         if ($ftyp) {
@@ -872,8 +918,10 @@ function Repair-MP4Container {
             $buffer = New-Object byte[] $ftyp.Size
             $reader.Read($buffer, 0, $ftyp.Size) | Out-Null
             $stream.Write($buffer, 0, $ftyp.Size)
+            Write-LogMessage -Level "INFO" -Message "Wrote FTYP atom"
         }
         else {
+            Write-LogMessage -Level "INFO" -Message "No valid FTYP found, writing default"
             # Write default FTYP
             $defaultFtyp = [byte[]]@(
                 0,0,0,20,              # size
@@ -888,52 +936,59 @@ function Repair-MP4Container {
         # Build or repair MOOV
         $moov = $Analysis.Structure.Atoms | Where-Object { $_.Type -eq "moov" -and $_.IsValid } | Select-Object -First 1
         if ($moov) {
-            # Verify and repair MOOV if needed
+            Write-LogMessage -Level "INFO" -Message "Found valid MOOV atom, verifying"
             $reader.Position = $moov.Offset
             $moovData = New-Object byte[] $moov.Size
             $reader.Read($moovData, 0, $moov.Size) | Out-Null
-            
-            if (Test-MOOVAtom -Data $moovData) {
-                $stream.Write($moovData, 0, $moovData.Length)
-            }
-            else {
-                # Rebuild MOOV
-                $newMoov = New-EnhancedMOOVAtom -VideoData $moovData -Analysis $Analysis
-                $stream.Write($newMoov, 0, $newMoov.Length)
-            }
+            $stream.Write($moovData, 0, $moovData.Length)
         }
         else {
-            # Generate new MOOV
+            Write-LogMessage -Level "INFO" -Message "Generating new MOOV atom"
             $newMoov = New-EnhancedMOOVAtom -Analysis $Analysis
+            if ($null -eq $newMoov) {
+                Write-LogMessage -Level "ERROR" -Message "Failed to generate MOOV atom"
+                throw "MOOV generation failed"
+            }
             $stream.Write($newMoov, 0, $newMoov.Length)
         }
         
         # Write MDAT
+        $mdatWritten = $false
         $mdat = $Analysis.Structure.Atoms | Where-Object { $_.Type -eq "mdat" -and $_.IsValid } | Select-Object -First 1
         if ($mdat) {
+            Write-LogMessage -Level "INFO" -Message "Found valid MDAT atom"
             $reader.Position = $mdat.Offset
             $bufferSize = 1MB
-            $buffer = New-Object byte[] $bufferSize
             $remaining = $mdat.Size
-            
             while ($remaining -gt 0) {
                 $readSize = [Math]::Min($bufferSize, $remaining)
+                $buffer = New-Object byte[] $readSize
                 $bytesRead = $reader.Read($buffer, 0, $readSize)
                 if ($bytesRead -eq 0) { break }
-                
                 $stream.Write($buffer, 0, $bytesRead)
                 $remaining -= $bytesRead
             }
+            $mdatWritten = $true
         }
-        else {
-            # Try to construct MDAT from valid NAL units
-            Write-VideoStream -Stream $stream -Analysis $Analysis -Reader $reader
+        
+        if (-not $mdatWritten) {
+            Write-LogMessage -Level "INFO" -Message "No valid MDAT found, attempting to write video stream"
+            if (-not (Write-VideoStream -Stream $stream -Analysis $Analysis -Reader $reader)) {
+                Write-LogMessage -Level "ERROR" -Message "Failed to write video stream"
+                throw "Video stream write failed"
+            }
         }
         
         $stream.Close()
         $reader.Close()
         
-        # Verify and finalize with FFmpeg
+        # Verify the rebuilt container
+        if (-not (Test-MediaFile -FilePath $tempFile)) {
+            Write-LogMessage -Level "ERROR" -Message "Rebuilt container verification failed"
+            throw "Container verification failed"
+        }
+        
+        # Use FFmpeg to finalize
         $process = Start-Process -FilePath "ffmpeg" -ArgumentList @(
             "-i", "`"$tempFile`"",
             "-c", "copy",
@@ -942,26 +997,29 @@ function Repair-MP4Container {
             "`"$OutputFile`""
         ) -NoNewWindow -PassThru -Wait -RedirectStandardError "$env:TEMP\ffmpeg_error.txt"
         
-        if ($process.ExitCode -eq 0) {
-            Write-LogMessage -Level "RECOVERY" -Message "MP4 container repair successful" -Detailed
+        if ($process.ExitCode -eq 0 -and (Test-Path $OutputFile) -and (Test-MediaFile -FilePath $OutputFile)) {
+            Write-LogMessage -Level "SUCCESS" -Message "Container repair successful"
             Remove-Item $tempFile -Force
             return $true
         }
         else {
             $errorContent = Get-Content "$env:TEMP\ffmpeg_error.txt" -Raw
-            Write-LogMessage -Level "ERROR" -Message "MP4 container repair failed: $errorContent" -Detailed
-            Remove-Item $tempFile -Force
+            Write-LogMessage -Level "ERROR" -Message "MP4 container repair failed: $errorContent"
+            if (Test-Path $tempFile) { Remove-Item $tempFile -Force }
+            if (Test-Path $OutputFile) { Remove-Item $OutputFile -Force }
             return $false
         }
     }
     catch {
-        Write-LogMessage -Level "ERROR" -Message "MP4 container repair failed: $($_.Exception.Message)" -Detailed
+        Write-LogMessage -Level "ERROR" -Message "Container repair failed: $($_.Exception.Message)"
+        if ($stream) { $stream.Close() }
+        if ($reader) { $reader.Close() }
         if (Test-Path $tempFile) { Remove-Item $tempFile -Force }
+        if (Test-Path $OutputFile) { Remove-Item $OutputFile -Force }
         return $false
     }
     finally {
-        if ($stream) { $stream.Dispose() }
-        if ($reader) { $reader.Dispose() }
+        if (Test-Path "$env:TEMP\ffmpeg_error.txt") { Remove-Item "$env:TEMP\ffmpeg_error.txt" -Force }
     }
 }
 
